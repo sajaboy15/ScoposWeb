@@ -22,8 +22,45 @@
     $('#site').title = t.url || '';
     session = (await bg({ type: 'session', tabId: tab.id })).session;
     await loadPlaybooks();
+    await loadLearn();
     render();
   }
+  // ---------- learning ----------
+  let learn = null, hasMap = false;
+  async function loadLearn() {
+    if (!tab || !tab.origin) { learn = null; return; }
+    const r = await bg({ type: 'learn:state', origin: tab.origin });
+    learn = r.learn; hasMap = r.hasMap;
+  }
+  function renderLearn() {
+    const box = $('#learn-box');
+    if (!box) return;
+    const L = learn || {};
+    if (L.status === 'exploring') {
+      box.innerHTML = `<h3>Изучаю продукт</h3><div class="stat"><div><b>${L.views || 0}</b><span>экранов</span></div><div><b>${L.probes || 0}</b><span>кнопок проверено</span></div></div>
+        <div class="now"><span class="spin"></span><span>${esc(L.label || '')}</span></div><button class="btn ghost" data-learn="stop">Остановить</button>`;
+    } else if (L.status === 'writing') {
+      box.innerHTML = `<h3>Пишу гайды</h3><p>Изучил ${L.views} экранов и окон. Claude пишет по карте готовые инструкции.</p><div class="now"><span class="spin"></span><span>Обычно это 20–40 секунд</span></div>`;
+    } else if (L.status === 'done' || L.status === 'mapped') {
+      const when = L.at ? new Date(L.at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : '';
+      box.innerHTML = `<h3>Продукт изучен${when ? ' · ' + when : ''}</h3><div class="stat"><div><b>${L.views}</b><span>экранов и окон</span></div><div><b>${L.guides || 0}</b><span>готовых гайдов</span></div></div>
+        ${L.summary ? `<p>${esc(L.summary)}</p>` : ''}${L.error ? `<p>${esc(L.error)}</p>` : ''}
+        <div class="row"><button class="btn ghost" data-learn="start">Изучить заново</button><button class="btn ghost" data-learn="forget">Забыть</button></div>`;
+    } else {
+      box.innerHTML = `<h3>Научите Scopos этому сайту</h3><p>Scopos один раз сам пройдёт по всем экранам, вкладкам и окнам и запомнит каждую кнопку. Потом Claude напишет готовые гайды. Они работают мгновенно, а новые вопросы получают точные шаги по всему продукту.</p>
+        ${L.status === 'error' ? `<p style="color:var(--bad)">${esc(L.error)}</p>` : ''}
+        <button class="btn main" data-learn="start">Изучить продукт</button>
+        <p class="faint small" style="margin:10px 0 0">Нажимаю только то, что открывает экраны и окна. Ничего не заполняю, не сохраняю и не отправляю. Лучше запускать под тестовым аккаунтом.</p>`;
+    }
+  }
+  $('#learn-box').addEventListener('click', async e => {
+    const b = e.target.closest('[data-learn]');
+    if (!b || !tab) return;
+    if (b.dataset.learn === 'start') { const r = await bg({ type: 'learn:start', tabId: tab.id }); if (r && r.error) flash(r.error); }
+    if (b.dataset.learn === 'stop') await bg({ type: 'learn:stop', tabId: tab.id });
+    if (b.dataset.learn === 'forget') { await bg({ type: 'learn:forget', origin: tab.origin }); await loadLearn(); await loadPlaybooks(); renderLearn(); renderPlaybooks(); }
+  });
+
   async function loadPlaybooks() {
     playbooks = tab && tab.origin ? (await bg({ type: 'playbooks', origin: tab.origin })).list || [] : [];
     $('#pb-num').textContent = playbooks.length ? playbooks.length : '';
@@ -33,6 +70,11 @@
   chrome.runtime.onMessage.addListener(msg => {
     if (msg.type === 'session' && tab && msg.tabId === tab.id) { session = msg.session; render(); }
     if (msg.type === 'record:stop-request' && tab && msg.tabId === tab.id) stopRecording();
+    if (msg.type === 'learn' && tab && msg.origin === tab.origin) {
+      learn = msg.learn;
+      if (learn.status === 'done') loadPlaybooks().then(() => { renderPlaybooks(); render(); });
+      if (view === 'pb') renderLearn();
+    }
   });
 
   // ---------- tabs ----------
@@ -105,7 +147,7 @@
           <span class="dot"><span>${i + 1}</span></span>
           <div class="txt">${esc(s.instruction)}${s.value ? `<br><span class="val">${esc(s.value)}</span>` : ''}</div>
         </li>`).join('')}</ol>` : ''}
-      <div class="meta">${fast ? '<span class="tag fast">Сценарий · мгновенно · 0 токенов</span>' : `<span class="tag">Claude${session.ms ? ' · ' + (session.ms / 1000).toFixed(1).replace('.', ',') + ' с' : ''}</span>`}</div>
+      <div class="meta">${fast ? '<span class="tag fast">Готовый гайд · мгновенно · 0 токенов</span>' : `<span class="tag">Claude${session.source === 'map' ? ' · по карте продукта' : ''}${session.ms ? ' · ' + (session.ms / 1000).toFixed(1).replace('.', ',') + ' с' : ''}</span>`}</div>
       ${steps.length && !done ? `<div class="actions row"><button class="btn ghost" data-act="stop">Остановить</button>${idx > 0 ? '<button class="btn ghost" data-act="restart">С начала</button>' : ''}</div>` : ''}
       ${done ? doneCard(fast) : ''}`;
     if (saving) { const f = $('#save-name'); if (f) f.focus(); }
@@ -166,6 +208,7 @@
   // ---------- playbooks view ----------
   const ruCount = (n, one, few, many) => { const m10 = n % 10, m100 = n % 100; return `${n} ${m10 === 1 && m100 !== 11 ? one : m10 >= 2 && m10 <= 4 && (m100 < 10 || m100 >= 20) ? few : many}`; };
   function renderPlaybooks() {
+    renderLearn();
     const recording = session && session.status === 'recording';
     $('#rec-start').hidden = !!recording;
     $('#pb-export').hidden = !playbooks.length || !!recording;
@@ -180,7 +223,7 @@
         <div class="row"><button class="btn main" data-act="rec-save" ${steps.length ? '' : 'disabled'}>Остановить и сохранить</button><button class="btn ghost" data-act="rec-cancel">Отменить</button></div></div>`;
     }
     $('#pb-list').innerHTML = playbooks.length ? playbooks.map(p => `
-      <div class="pb"><b>${esc(p.name)}</b>
+      <div class="pb"><b>${esc(p.name)}${p.learned ? '<span class="tagl">гайд</span>' : ''}</b>
         <small>${ruCount(p.steps.length, 'шаг', 'шага', 'шагов')}${p.runs ? ' · запускали ' + ruCount(p.runs, 'раз', 'раза', 'раз') : ''}${p.healed ? ' · сам обновился ' + ruCount(p.healed, 'раз', 'раза', 'раз') : ''}</small>
         <div class="row"><button class="icon play" data-run="${esc(p.id)}" title="Запустить" aria-label="Запустить">▶</button><button class="icon" data-del="${esc(p.id)}" title="Удалить" aria-label="Удалить">✕</button></div>
       </div>`).join('') : (recording ? '' : '<div class="empty">Здесь появятся сценарии: сохраните ответ Scopos или запишите свой.</div>');

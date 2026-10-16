@@ -105,6 +105,121 @@ reply in the user's language. no markdown.`;
     return body('you match a guide step to a control on a web page. answer only with the id from the map.', messages, LOCATE_SCHEMA, 'low');
   }
 
+  // ---------------- product map: learned once by the explorer ----------------
+
+  const REF_STEP = {
+    type: 'object',
+    properties: {
+      instruction: { type: 'string' },
+      element_ref: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+      action: { type: 'string', enum: ['click', 'type', 'select', 'look'] },
+      value: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    },
+    required: ['instruction', 'element_ref', 'action', 'value'],
+    additionalProperties: false,
+  };
+  const MAP_ASK_SCHEMA = {
+    type: 'object',
+    properties: { answer: { type: 'string' }, steps: { type: 'array', items: REF_STEP } },
+    required: ['answer', 'steps'],
+    additionalProperties: false,
+  };
+  const LEARN_SCHEMA = {
+    type: 'object',
+    properties: {
+      summary: { type: 'string' },
+      guides: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { name: { type: 'string' }, steps: { type: 'array', items: REF_STEP } },
+          required: ['name', 'steps'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['summary', 'guides'],
+    additionalProperties: false,
+  };
+
+  const MAP_RULES = `the product map lists every screen (page), dialog and panel of the product, as
+VIEW <id> <kind> "<title>" <address>
+  <ref> <role> "<name>" · <section> · <state> → <id of the view it opens>
+controls listed under GLOBAL are on every page (navigation). a control with → opens that view.
+to reach a view, follow the → links from where the user is. dialogs and panels open from their opener control.
+
+STEPS
+- one action per step, in the order the user performs them, starting from the user's current view.
+- element_ref is the ref of the control for that step (for example "V3.4"), taken only from the map. null only for a step with no control.
+- instruction is one short sentence naming the control the way it is labeled: "Нажмите «Новый счёт»".
+- action: click, type, select, or look.
+- value: when the user named what to enter, put it here: for a select, the matching option exactly as written in its options list; for a text field, the text. otherwise null.
+- in a form, include the fields the user has to fill and the button that finishes the task.
+write in the product's interface language. no markdown.`;
+
+  /** Compact text form of a product map. Navigation repeated on every page is listed once as GLOBAL. */
+  function mapText(map) {
+    const pages = map.views.filter(v => v.kind === 'page');
+    const sig = c => `${c.role}|${c.name}|${c.to || ''}`;
+    const count = {};
+    pages.forEach(v => new Set(v.controls.map(sig)).forEach(k => { count[k] = (count[k] || 0) + 1; }));
+    const global = new Set(pages.length > 2 ? Object.keys(count).filter(k => count[k] >= Math.ceil(pages.length * 0.7)) : []);
+    const line = c => `  ${c.ref} ${c.role} "${c.name}"${c.section ? ' · ' + c.section : ''}${c.state ? ' · ' + c.state : ''}${c.options && c.options.length ? ' · options: ' + c.options.join(' | ') : ''}${c.to ? ' → ' + c.to : ''}`;
+    const out = [];
+    if (global.size) {
+      const first = pages.find(v => v.controls.some(c => global.has(sig(c))));
+      out.push('GLOBAL (on every page, refs from ' + first.id + ')');
+      first.controls.filter(c => global.has(sig(c))).forEach(c => out.push(line(c)));
+    }
+    for (const v of map.views) {
+      const where = v.kind === 'page' ? v.key : `opens from ${v.opener} on ${v.parent}`;
+      out.push(`VIEW ${v.id} ${v.kind} "${v.title}" ${where}`);
+      v.controls.filter(c => v.kind !== 'page' || !global.has(sig(c))).forEach(c => out.push(line(c)));
+    }
+    return out.join('\n');
+  }
+
+  const mapSystem = (lead, map, product) => [
+    { type: 'text', text: `${lead}\n\n${MAP_RULES}` },
+    // The map is the large, stable part of every request: cache it.
+    { type: 'text', text: `${product ? 'product: ' + product + '\n' : ''}PRODUCT MAP\n${mapText(map)}`, cache_control: { type: 'ephemeral' } },
+  ];
+
+  /** Writes the ready-made guides for the product's main tasks from the map. */
+  function buildLearn({ map, product = '' }) {
+    const system = mapSystem('you are Scopos. you studied a software product by walking through every screen, and now you write the in-product guides its users need most.', map, product);
+    const messages = [{ role: 'user', content: 'write guides for the 8 to 15 most common tasks a user of this product does (creating the main records, inviting people, changing settings, finding things). name each guide as the task in the user\'s words, for example "Выставить счёт клиенту". each guide starts on the first page of the map. also give a one-sentence summary of what the product is.' }];
+    return body(system, messages, LEARN_SCHEMA, 'medium');
+  }
+
+  /** Answers a question from the whole map: steps across pages point at known controls, nothing is guessed. */
+  function buildAskMap({ question, map, current, history = [], product = '' }) {
+    const system = mapSystem('you are Scopos, a product guide inside a web app. the user asks how to do something or asks about the product.', map, product);
+    const messages = history.slice(-6).map(t => ({ role: t.role, content: t.content }));
+    messages.push({ role: 'user', content: `the user is on view ${current || 'unknown'}.\n${question}\n\nif it is a question rather than a task, answer it in "answer" and return no steps.` });
+    return body(system, messages, MAP_ASK_SCHEMA, 'low');
+  }
+
+  /** Turns ref-based steps into runnable steps with element descriptors. */
+  function refSteps(steps, map) {
+    const byRef = {};
+    map.views.forEach(v => v.controls.forEach(c => { byRef[c.ref] = c; }));
+    return steps.map(s => {
+      const c = s.element_ref && byRef[s.element_ref];
+      return { instruction: s.instruction, action: s.action, value: s.value, target: c ? { ...c.d, text: c.d.text || c.name, role: c.d.role || c.role } : null };
+    });
+  }
+
+  /** Which map view the user is on now, by address. */
+  function viewOf(map, url) {
+    try {
+      const u = new URL(url);
+      const key = u.pathname + (u.hash && u.hash !== '#' && u.hash !== '#/' ? u.hash : '');
+      const v = map.views.find(x => x.kind === 'page' && x.key === key);
+      return v ? v.id : null;
+    } catch (e) { return null; }
+  }
+
   function body(system, messages, schema, effort) {
     return {
       model: MODEL,
@@ -155,7 +270,7 @@ reply in the user's language. no markdown.`;
     return parse(await res.json());
   }
 
-  const Brain = { MODEL, buildAsk, buildLocate, call, parse, headers, API_URL };
+  const Brain = { MODEL, buildAsk, buildLocate, buildLearn, buildAskMap, mapText, refSteps, viewOf, call, parse, headers, API_URL };
   if (typeof module === 'object' && module.exports) module.exports = Brain;
   root.ScoposBrain = Brain;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

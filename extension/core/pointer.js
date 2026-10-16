@@ -117,6 +117,14 @@
   }
 
   function renderCard(o) {
+    if (o.explore) {
+      card.innerHTML = `
+      <div class="top"><span class="mark"></span><span class="count">Scopos изучает продукт · действие ${o.step}</span></div>
+      <div class="text">${esc(o.instruction)}</div>
+      <div class="bar"><button class="btn" data-do="close">Остановить</button></div>
+      <div class="hint">Нажимаю только то, что открывает экраны и окна. Ничего не сохраняю и не отправляю.</div>`;
+      return;
+    }
     card.innerHTML = `
       <div class="top"><span class="mark"></span><span class="count">${o.total > 1 ? `Шаг ${o.step} из ${o.total}` : 'Scopos'}</span><button class="x" data-do="close" aria-label="Закрыть подсказку">×</button></div>
       <div class="text">${esc(o.instruction)}</div>

@@ -31,6 +31,8 @@ async function setSession(tabId, patch) {
 const pbKey = origin => `playbooks:${origin}`;
 const getPlaybooks = async origin => (await chrome.storage.local.get(pbKey(origin)))[pbKey(origin)] || [];
 const setPlaybooks = (origin, list) => chrome.storage.local.set({ [pbKey(origin)]: list });
+const mapKey = origin => `map:${origin}`;
+const getMap = async origin => (await chrome.storage.local.get(mapKey(origin)))[mapKey(origin)] || null;
 const getKey = async () => (await chrome.storage.local.get('apiKey')).apiKey || '';
 chrome.tabs.onRemoved.addListener(tabId => chrome.storage.session.remove(sessionKey(tabId)));
 
@@ -40,7 +42,7 @@ async function toTab(tabId, msg) {
     return await chrome.tabs.sendMessage(tabId, msg);
   } catch (e) {
     // Tabs opened before the extension was installed have no content script yet.
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['core/scan.js', 'core/pointer.js', 'core/guide.js', 'content.js'] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['core/scan.js', 'core/pointer.js', 'core/guide.js', 'core/explore.js', 'content.js'] });
     return chrome.tabs.sendMessage(tabId, msg);
   }
 }
@@ -83,6 +85,17 @@ async function ask(tabId, question) {
   const ctl = new AbortController();
   inflight.set(tabId, ctl);
   await setSession(tabId, { question, answer: '', steps: [], index: 0, status: 'thinking', source: 'claude', origin, error: null });
+
+  // A learned product map: plan across every screen at once, with exact controls.
+  const map = await getMap(origin);
+  if (map) {
+    const prevMap = await getSession(tabId);
+    const historyMap = (prevMap && prevMap.history) || [];
+    const out = await Brain.call(Brain.buildAskMap({ question, map, current: Brain.viewOf(map, tab.url), history: historyMap }), apiKey, { signal: ctl.signal });
+    inflight.delete(tabId);
+    const nextHistory = [...historyMap, { role: 'user', content: question }, { role: 'assistant', content: JSON.stringify(out) }].slice(-6);
+    return start(tabId, { question, answer: out.answer, steps: Brain.refSteps(out.steps, map), source: 'map', ms: Date.now() - t0, origin, history: nextHistory });
+  }
 
   const page = await toTab(tabId, { type: 'scan' });
   const prev = await getSession(tabId);
@@ -150,6 +163,33 @@ async function storeHealed(tabId, index, target) {
     const list = await getPlaybooks(s.origin);
     const pb = list.find(p => p.id === s.playbookId);
     if (pb && pb.steps[index]) { pb.steps[index].target = target; pb.healed = (pb.healed || 0) + 1; await setPlaybooks(s.origin, list); }
+  }
+}
+
+// ---------- learning: the explorer walks the product, then Claude writes guides from the map ----------
+const exploreKey = tabId => `explore:${tabId}`;
+const learnKey = origin => `learn:${origin}`;
+async function setLearn(origin, patch) {
+  const cur = (await chrome.storage.local.get(learnKey(origin)))[learnKey(origin)] || {};
+  const next = { ...cur, ...patch };
+  await chrome.storage.local.set({ [learnKey(origin)]: next });
+  chrome.runtime.sendMessage({ type: 'learn', origin, learn: next }).catch(() => {});
+  return next;
+}
+async function learnFrom(origin, map) {
+  await chrome.storage.local.set({ [mapKey(origin)]: map });
+  const apiKey = await getKey();
+  if (!apiKey) return setLearn(origin, { status: 'mapped', views: map.views.length, probes: map.probes, at: Date.now(), error: 'Карта сохранена. Чтобы Claude написал гайды, добавьте ключ в настройках.' });
+  await setLearn(origin, { status: 'writing', views: map.views.length, probes: map.probes });
+  try {
+    const out = await Brain.call(Brain.buildLearn({ map }), apiKey);
+    const guides = out.guides.map(g => ({ id: crypto.randomUUID(), name: g.name.slice(0, 90), steps: Brain.refSteps(g.steps, map), created: Date.now(), runs: 0, learned: true })).filter(g => g.steps.some(st => st.target));
+    // Learned guides replace the previous learned set; scenarios the user recorded stay.
+    const mine = (await getPlaybooks(origin)).filter(p => !p.learned);
+    await setPlaybooks(origin, [...guides, ...mine]);
+    return setLearn(origin, { status: 'done', views: map.views.length, probes: map.probes, guides: guides.length, summary: out.summary, at: Date.now(), error: null });
+  } catch (e) {
+    return setLearn(origin, { status: 'error', error: e.message || String(e) });
   }
 }
 
@@ -233,6 +273,28 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         if (!s || s.status !== 'recording') return reply({});
         return reply({ session: await setSession(fromTab, { recorded: [...(s.recorded || []), msg.step] }) });
       }
+      case 'learn:start': {
+        const tab = await chrome.tabs.get(msg.tabId);
+        if (!usable(tab.url)) return reply({ error: 'На этой странице браузер не даёт расширениям работать.' });
+        await toTab(msg.tabId, { type: 'guide:stop' }).catch(() => {});
+        await setLearn(originOf(tab.url), { status: 'exploring', views: 0, probes: 0, label: 'Начинаю', error: null });
+        await toTab(msg.tabId, { type: 'explore:start' });
+        return reply({ ok: true });
+      }
+      case 'learn:stop': await toTab(msg.tabId, { type: 'explore:stop' }).catch(() => {}); return reply({});
+      case 'learn:state': return reply({ learn: (await chrome.storage.local.get(learnKey(msg.origin)))[learnKey(msg.origin)] || null, hasMap: !!(await getMap(msg.origin)) });
+      case 'learn:forget':
+        await chrome.storage.local.remove([mapKey(msg.origin), learnKey(msg.origin)]);
+        await setPlaybooks(msg.origin, (await getPlaybooks(msg.origin)).filter(p => !p.learned));
+        return reply({ ok: true });
+      // explorer state lives here, so a page load in the middle of the walk resumes on the next page
+      case 'explore:load': return reply({ st: (await chrome.storage.session.get(exploreKey(fromTab)))[exploreKey(fromTab)] || null });
+      case 'explore:save': await chrome.storage.session.set({ [exploreKey(fromTab)]: msg.st }); return reply({});
+      case 'explore:progress': await setLearn(originOf(sender.tab.url), { status: 'exploring', ...msg.p }); return reply({});
+      case 'explore:done':
+        await chrome.storage.session.remove(exploreKey(fromTab));
+        learnFrom(originOf(sender.tab.url), msg.map);
+        return reply({});
       case 'record:stop-request':
         chrome.runtime.sendMessage({ type: 'record:stop-request', tabId: fromTab }).catch(() => {});
         return reply({});

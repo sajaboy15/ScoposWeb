@@ -22,7 +22,21 @@
   const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
   const cut = (s, n = 70) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
-  function isOurs(el) { return !!(el.closest && el.closest('[data-scopos-ui]')); }
+  // Browser extensions inject their own buttons into pages (assistants, password managers, grammar checkers).
+  // They are not part of the product, so they stay out of the map and out of answers.
+  const FOREIGN_ID = /^(claude|grammarly|gr-|lastpass|lp-|1p-|onepassword|com-1password|bitwarden|dashlane|honey|loom|dark-?reader|monica|merlin|sider|maxai)/i;
+  function foreign(el) {
+    for (let n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if ((n.id && FOREIGN_ID.test(n.id)) || /^(grammarly|loom|monica|sider)-/i.test(n.tagName)) return true;
+      if (n.parentElement === document.body || n.parentElement === document.documentElement) {
+        const cs = getComputedStyle(n);
+        if (cs.position === 'fixed' && +cs.zIndex >= 2147480000) return true;
+      }
+    }
+    return false;
+  }
+
+  function isOurs(el) { return !!(el.closest && el.closest('[data-scopos-ui]')) || foreign(el); }
 
   function visible(el) {
     const r = el.getBoundingClientRect();
@@ -54,7 +68,15 @@
     }
     const a = el.getAttribute('aria-label');
     if (clean(a)) return clean(a);
-    if (el.labels && el.labels.length) { const t = clean([...el.labels].map(l => l.textContent).join(' ')); if (t) return t; }
+    if (el.labels && el.labels.length) {
+      // A label that wraps its control also contains the control's own text (a select's options): leave that out.
+      const t = clean([...el.labels].map(l => {
+        const copy = l.cloneNode(true);
+        copy.querySelectorAll('select,textarea,input,option,button').forEach(n => n.remove());
+        return copy.textContent;
+      }).join(' '));
+      if (t) return t;
+    }
     const tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       const t = clean(el.getAttribute('placeholder') || (el.type === 'submit' || el.type === 'button' ? el.value : '') || el.getAttribute('title') || el.getAttribute('name'));
@@ -83,7 +105,8 @@
     const out = [];
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') out.push('disabled');
     if (el.getAttribute('aria-expanded') === 'true') out.push('expanded');
-    if (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-current')) out.push('current');
+    const cur = el.getAttribute('aria-current');
+    if (el.getAttribute('aria-selected') === 'true' || (cur && cur !== 'false')) out.push('current');
     if ('checked' in el && (el.type === 'checkbox' || el.type === 'radio')) out.push(el.checked ? 'checked' : 'unchecked');
     // What the user typed never leaves the page: only whether the field is filled.
     if ((el.tagName === 'INPUT' && !/checkbox|radio|submit|button/.test(el.type)) || el.tagName === 'TEXTAREA') out.push(el.value ? 'filled' : 'empty');
@@ -125,6 +148,26 @@
   }
 
   const byId = id => snapshot.get(id) || null;
+
+  /**
+   * The whole control tree of the current view (or of one container, such as an open dialog),
+   * in document order and not limited to the viewport. Used by the explorer to map the product once.
+   */
+  function inventory(container) {
+    const scope = container || document;
+    const out = [];
+    for (const el of scope.querySelectorAll(CONTROL)) {
+      if (out.length >= 400) break;
+      if (isOurs(el) || redundant(el) || !visible(el)) continue;
+      if (!container && el.closest('dialog[open],[role=dialog],[aria-modal=true]')) continue;
+      const n = cut(name(el));
+      if (!n && role(el) !== 'textbox') continue;
+      const st = state(el).replace(/(^|, )offscreen/, '').replace(/^, /, '');
+      const options = el.tagName === 'SELECT' ? [...el.options].slice(0, 15).map(o => cut(clean(o.textContent), 40)).filter(Boolean) : undefined;
+      out.push({ el, role: role(el), name: n, section: cut(section(el), 40), state: st, options });
+    }
+    return out;
+  }
 
   function cssPath(el) {
     const parts = [];
@@ -176,6 +219,7 @@
   }
 
   S.scan = scan;
+  S.inventory = inventory;
   S.byId = byId;
   S.describe = describe;
   S.resolve = resolve;

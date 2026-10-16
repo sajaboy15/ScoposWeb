@@ -24,7 +24,7 @@
   };
   const KEY = 'scopos:run';
   let playbooks = Array.isArray(window.ScoposPlaybooks) ? window.ScoposPlaybooks : [];
-  let history = [];
+  let chat = []; // the last turns with Claude, for follow-up questions
   let state = null; // { question, answer, steps, index, source, status, error }
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -32,6 +32,50 @@
   const load = () => { try { return JSON.parse(sessionStorage.getItem(KEY) || 'null'); } catch (e) { return null; } };
 
   if (cfg.playbooksUrl) fetch(cfg.playbooksUrl).then(r => (r.ok ? r.json() : [])).then(list => { if (Array.isArray(list)) playbooks = list; }).catch(() => {});
+
+  // Guides the explorer and Claude wrote for this product (see learn mode below).
+  let learned = null; // { summary, guides, views, learnedAt }
+  const addLearned = k => {
+    learned = k && k.guides && k.guides.length ? k : null;
+    if (!learned) return;
+    const ids = new Set(learned.guides.map(g => g.id));
+    playbooks = [...learned.guides, ...playbooks.filter(p => !ids.has(p.id))];
+  };
+  fetch(cfg.endpoint + '/knowledge').then(r => (r.ok ? r.json() : null)).then(k => { addLearned(k); render(); }).catch(() => {});
+
+  // ---------- learn mode: the explorer walks the product once (open the page with ?scopos-learn=1) ----------
+  const LEARN_KEY = 'scopos:explore';
+  const exploreStore = {
+    load: async () => { try { return JSON.parse(sessionStorage.getItem(LEARN_KEY) || 'null'); } catch (e) { return null; } },
+    save: async st => { try { sessionStorage.setItem(LEARN_KEY, JSON.stringify(st)); } catch (e) {} },
+  };
+  let learning = null; // { views, probes, label } while exploring, { status:'writing'|'done'|'error', ... } after
+  const learnOpts = {
+    store: exploreStore,
+    onProgress: p => { learning = { status: 'exploring', ...p }; render(); },
+    onDone: async map => {
+      learning = { status: 'writing', views: map.views.length, probes: map.probes };
+      setOpen(true); render();
+      try {
+        const res = await fetch(cfg.endpoint + '/learn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ map, product: cfg.product }) });
+        const out = await res.json();
+        if (!res.ok) throw new Error(out.error || 'Не получилось');
+        addLearned(out);
+        learning = { status: 'done', views: map.views.length, probes: map.probes, guides: out.guides.length, summary: out.summary };
+      } catch (e) {
+        learning = { status: 'error', error: e.message };
+      }
+      try { sessionStorage.removeItem(LEARN_KEY); } catch (e) {}
+      render();
+    },
+  };
+  function startLearning() {
+    S.guide.stop(false);
+    state = null; save();
+    learning = { status: 'exploring', views: 0, probes: 0, label: 'Начинаю' };
+    setOpen(false); render();
+    S.explore.start(learnOpts);
+  }
 
   // ---------- UI ----------
   const CSS_TEXT = `
@@ -97,10 +141,18 @@ input:focus-visible { outline: none; }
 
   function render() {
     const launch = root.querySelector('.launch');
-    if (launch) launch.innerHTML = `<span class="ring"></span>${state && state.status === 'running' && state.steps.length ? `Шаг ${Math.min((state.index || 0) + 1, state.steps.length)} из ${state.steps.length}` : esc(cfg.label)}`;
+    if (launch) launch.innerHTML = `<span class="ring"></span>${learning && learning.status === 'exploring' ? `Изучаю · ${learning.views} экр.` : learning && learning.status === 'writing' ? 'Пишу гайды…' : state && state.status === 'running' && state.steps.length ? `Шаг ${Math.min((state.index || 0) + 1, state.steps.length)} из ${state.steps.length}` : esc(cfg.label)}`;
+    if (learning && learning.status !== 'exploring') {
+      body.innerHTML = learning.status === 'writing'
+        ? `<div class="think"><span class="spin"></span>Изучил ${learning.views} экранов и окон. Пишу готовые гайды…</div>`
+        : learning.status === 'error' ? `<div class="err">${esc(learning.error)}</div>`
+        : `<p class="a">Изучил продукт: ${learning.views} экранов и окон, ${learning.probes} проверенных кнопок.</p><p class="hi">${esc(learning.summary || '')}</p>
+           <div class="q">Готовые гайды · ${learning.guides}</div><div class="chips">${playbooks.filter(p => p.learned).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>`;
+      return;
+    }
     if (!state) {
       body.innerHTML = `<p class="hi">Спросите, как что-то сделать. Я покажу каждый шаг прямо здесь, на странице.</p>
-        ${playbooks.length ? `<div class="chips">${playbooks.slice(0, 4).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>` : ''}`;
+        ${playbooks.length ? `${learned ? `<div class="q">Готовые гайды · изучено ${learned.views} экранов</div>` : ''}<div class="chips">${playbooks.slice(0, learned ? 8 : 4).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>` : ''}`;
       return;
     }
     if (state.status === 'thinking') { body.innerHTML = `<div class="q">${esc(state.question)}</div><div class="think"><span class="spin"></span>Читаю страницу и продумываю шаги</div>`; return; }
@@ -108,7 +160,7 @@ input:focus-visible { outline: none; }
     const idx = state.index || 0, done = state.status === 'done';
     body.innerHTML = `<div class="q">${esc(state.question)}</div>${state.answer ? `<p class="a">${esc(state.answer)}</p>` : ''}
       ${state.steps.length ? `<ol>${state.steps.map((s, i) => `<li class="${i < idx || done ? 'done' : i === idx ? 'cur' : ''}"><i>${i + 1}</i><span>${esc(s.instruction)}</span></li>`).join('')}</ol>` : ''}
-      <div class="meta">${state.source === 'playbook' ? 'Сценарий · мгновенно' : 'Ответ Claude'}${done ? ' · готово' : ''}</div>`;
+      <div class="meta">${state.source === 'playbook' ? 'Готовый гайд · мгновенно' : state.source === 'map' ? 'Claude · по карте продукта' : 'Ответ Claude'}${done ? ' · готово' : ''}</div>`;
   }
 
   function setOpen(on) { w.classList.toggle('open', on); if (on) setTimeout(() => input.focus(), 50); }
@@ -116,7 +168,7 @@ input:focus-visible { outline: none; }
   root.addEventListener('click', e => {
     const b = e.target.closest('[data-do],[data-pb]');
     if (!b) return;
-    if (b.dataset.pb) { const pb = playbooks.find(p => p.id === b.dataset.pb); if (pb) runSteps(pb.name, `Сценарий «${pb.name}»`, pb.steps, 'playbook'); return; }
+    if (b.dataset.pb) { learning = null; const pb = playbooks.find(p => p.id === b.dataset.pb); if (pb) runSteps(pb.name, `Сценарий «${pb.name}»`, pb.steps, 'playbook'); return; }
     if (b.dataset.do === 'toggle') setOpen(!w.classList.contains('open'));
     if (b.dataset.do === 'close') setOpen(false);
   });
@@ -137,17 +189,18 @@ input:focus-visible { outline: none; }
 
   async function ask(question) {
     S.guide.stop(false);
+    learning = null;
     const pb = matchPlaybook(question);
     if (pb) return runSteps(question, `Сценарий «${pb.name}»`, pb.steps, 'playbook');
     state = { question, status: 'thinking', steps: [] }; render();
     try {
       const page = S.scan();
-      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, page, history, product: cfg.product }) });
+      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, page, history: chat, product: cfg.product }) });
       const out = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(out.error || `Сервер ответил ошибкой ${res.status}`);
-      history = [...history, { role: 'user', content: question }, { role: 'assistant', content: JSON.stringify(out) }].slice(-6);
-      const steps = toSteps(out.steps);
-      runSteps(question, out.answer, steps, 'claude');
+      chat = [...chat, { role: 'user', content: question }, { role: 'assistant', content: JSON.stringify(out) }].slice(-6);
+      const steps = out.ready ? out.steps : toSteps(out.steps);
+      runSteps(question, out.answer, steps, out.ready ? 'map' : 'claude');
     } catch (e) {
       state = { question, status: 'error', error: e.message || 'Не получилось ответить', steps: [] }; render();
     }
@@ -166,7 +219,7 @@ input:focus-visible { outline: none; }
     replanned.add(index);
     const progress = state.steps.slice(0, index).map(s => s.instruction);
     try {
-      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: state.question, page: S.scan(), history, progress, product: cfg.product }) });
+      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: state.question, page: S.scan(), history: chat, progress, product: cfg.product }) });
       const out = res.ok ? await res.json() : null;
       if (!out || !state || state.index !== index) return;
       const rest = toSteps(out.steps || []);
@@ -201,13 +254,19 @@ input:focus-visible { outline: none; }
     });
   }
 
-  function boot() {
+  async function boot() {
     (document.body || document.documentElement).appendChild(host);
     state = load();
     render();
+    if (await S.explore.resume(learnOpts)) { learning = { status: 'exploring', views: 0, probes: 0 }; render(); return; }
+    if (new URLSearchParams(location.search).has('scopos-learn')) {
+      const u = new URL(location.href); u.searchParams.delete('scopos-learn');
+      window.history.replaceState(null, '', u.href);
+      return startLearning();
+    }
     if (state && state.status === 'running' && state.index < state.steps.length) start(state.index);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 
-  S.widget = { open: () => setOpen(true), ask, cfg };
+  S.widget = { open: () => setOpen(true), ask, learn: startLearning, cfg };
 })();

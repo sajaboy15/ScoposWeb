@@ -42,6 +42,8 @@
         S.pointer.recording(true, { onStop: () => send({ type: 'record:stop-request' }) });
         reply({ ok: true });
         break;
+      case 'explore:start': S.explore.start(exploreOpts); reply({ ok: true }); break;
+      case 'explore:stop': S.explore.stop(); reply({ ok: true }); break;
       case 'record:stop':
         S.pointer.recording(false);
         reply({ steps: S.recorder.stop() });
@@ -50,6 +52,14 @@
     }
     return false;
   });
+
+  // The explorer keeps its state in the service worker, so it survives full page loads.
+  const exploreOpts = {
+    store: { load: async () => ((await send({ type: 'explore:load' })) || {}).st || null, save: st => send({ type: 'explore:save', st }) },
+    onProgress: p => send({ type: 'explore:progress', p }),
+    onDone: map => send({ type: 'explore:done', map }),
+  };
+  S.explore.resume(exploreOpts);
 
   // Resume a walkthrough that continues on this page.
   send({ type: 'resume' }).then(res => { if (res && res.steps) startGuide(res.steps, res.index, res.missingDelay); });

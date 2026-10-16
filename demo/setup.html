@@ -73,14 +73,25 @@ code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background
   <section class="step" id="s2">
     <span class="n">2</span>
     <div>
-      <h2>Попробуйте на демо-продукте</h2>
-      <p>Ledgerly это маленький сервис счетов. Нажмите «Спросить» внизу справа и задайте любой вопрос своими словами, например «как добавить нового клиента» или «где сменить тариф».</p>
+      <h2>Научите Scopos продукту</h2>
+      <p>Scopos один раз сам пройдёт по Ledgerly: откроет каждый экран, вкладку и окно и запомнит все кнопки и поля. Потом Claude напишет по этой карте готовые гайды. Они работают мгновенно и без токенов, а новые вопросы отвечаются по всей карте сразу.</p>
+      <p class="note">Агент нажимает только то, что открывает экраны и окна. Он ничего не заполняет, не сохраняет и не отправляет.</p>
+      <a class="btn main" href="/?scopos-learn=1">Изучить Ledgerly</a>
+      <div class="state" id="learn-state"></div>
+    </div>
+  </section>
+
+  <section class="step" id="s2b">
+    <span class="n">3</span>
+    <div>
+      <h2>Спросите что угодно</h2>
+      <p>Нажмите «Спросить» внизу справа и задайте вопрос своими словами, например «как добавить нового клиента» или «где сменить тариф».</p>
       <a class="btn soft" href="/" id="open-demo">Открыть Ledgerly</a>
     </div>
   </section>
 
   <section class="step" id="s3">
-    <span class="n">3</span>
+    <span class="n">4</span>
     <div>
       <h2>Поставьте расширение в Chrome</h2>
       <p>С ним Scopos работает на любом сайте, не только на демо.</p>
@@ -110,6 +121,11 @@ function show(info, extra = '') {
 }
 let info = {};
 api('GET').then(i => { info = i; show(i); if (!i.set) $('#key').focus(); });
+fetch('/api/scopos/knowledge').then(r => r.json()).then(k => {
+  if (!k.guides || !k.guides.length) return;
+  $('#s2').classList.add('done');
+  $('#learn-state').innerHTML = `<span class="pill ok">Изучено ${k.views} экранов · ${k.guides.length} гайдов</span>`;
+});
 
 $('#key-form').addEventListener('submit', async e => {
   e.preventDefault();

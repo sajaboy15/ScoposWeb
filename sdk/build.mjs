@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const parts = ['extension/core/scan.js', 'extension/core/pointer.js', 'extension/core/guide.js', 'sdk/widget.js'];
+const parts = ['extension/core/scan.js', 'extension/core/pointer.js', 'extension/core/guide.js', 'extension/core/explore.js', 'sdk/widget.js'];
 
 export function build() {
   const banner = `/*! Scopos SDK · AI-гид внутри вашего продукта · built ${new Date().toISOString().slice(0, 10)} */\n`;

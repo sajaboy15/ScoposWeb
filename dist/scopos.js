@@ -24,7 +24,21 @@
   const clean = s => String(s || '').replace(/\s+/g, ' ').trim();
   const cut = (s, n = 70) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
 
-  function isOurs(el) { return !!(el.closest && el.closest('[data-scopos-ui]')); }
+  // Browser extensions inject their own buttons into pages (assistants, password managers, grammar checkers).
+  // They are not part of the product, so they stay out of the map and out of answers.
+  const FOREIGN_ID = /^(claude|grammarly|gr-|lastpass|lp-|1p-|onepassword|com-1password|bitwarden|dashlane|honey|loom|dark-?reader|monica|merlin|sider|maxai)/i;
+  function foreign(el) {
+    for (let n = el; n && n !== document.body && n !== document.documentElement; n = n.parentElement) {
+      if ((n.id && FOREIGN_ID.test(n.id)) || /^(grammarly|loom|monica|sider)-/i.test(n.tagName)) return true;
+      if (n.parentElement === document.body || n.parentElement === document.documentElement) {
+        const cs = getComputedStyle(n);
+        if (cs.position === 'fixed' && +cs.zIndex >= 2147480000) return true;
+      }
+    }
+    return false;
+  }
+
+  function isOurs(el) { return !!(el.closest && el.closest('[data-scopos-ui]')) || foreign(el); }
 
   function visible(el) {
     const r = el.getBoundingClientRect();
@@ -56,7 +70,15 @@
     }
     const a = el.getAttribute('aria-label');
     if (clean(a)) return clean(a);
-    if (el.labels && el.labels.length) { const t = clean([...el.labels].map(l => l.textContent).join(' ')); if (t) return t; }
+    if (el.labels && el.labels.length) {
+      // A label that wraps its control also contains the control's own text (a select's options): leave that out.
+      const t = clean([...el.labels].map(l => {
+        const copy = l.cloneNode(true);
+        copy.querySelectorAll('select,textarea,input,option,button').forEach(n => n.remove());
+        return copy.textContent;
+      }).join(' '));
+      if (t) return t;
+    }
     const tag = el.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       const t = clean(el.getAttribute('placeholder') || (el.type === 'submit' || el.type === 'button' ? el.value : '') || el.getAttribute('title') || el.getAttribute('name'));
@@ -85,7 +107,8 @@
     const out = [];
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') out.push('disabled');
     if (el.getAttribute('aria-expanded') === 'true') out.push('expanded');
-    if (el.getAttribute('aria-selected') === 'true' || el.getAttribute('aria-current')) out.push('current');
+    const cur = el.getAttribute('aria-current');
+    if (el.getAttribute('aria-selected') === 'true' || (cur && cur !== 'false')) out.push('current');
     if ('checked' in el && (el.type === 'checkbox' || el.type === 'radio')) out.push(el.checked ? 'checked' : 'unchecked');
     // What the user typed never leaves the page: only whether the field is filled.
     if ((el.tagName === 'INPUT' && !/checkbox|radio|submit|button/.test(el.type)) || el.tagName === 'TEXTAREA') out.push(el.value ? 'filled' : 'empty');
@@ -127,6 +150,26 @@
   }
 
   const byId = id => snapshot.get(id) || null;
+
+  /**
+   * The whole control tree of the current view (or of one container, such as an open dialog),
+   * in document order and not limited to the viewport. Used by the explorer to map the product once.
+   */
+  function inventory(container) {
+    const scope = container || document;
+    const out = [];
+    for (const el of scope.querySelectorAll(CONTROL)) {
+      if (out.length >= 400) break;
+      if (isOurs(el) || redundant(el) || !visible(el)) continue;
+      if (!container && el.closest('dialog[open],[role=dialog],[aria-modal=true]')) continue;
+      const n = cut(name(el));
+      if (!n && role(el) !== 'textbox') continue;
+      const st = state(el).replace(/(^|, )offscreen/, '').replace(/^, /, '');
+      const options = el.tagName === 'SELECT' ? [...el.options].slice(0, 15).map(o => cut(clean(o.textContent), 40)).filter(Boolean) : undefined;
+      out.push({ el, role: role(el), name: n, section: cut(section(el), 40), state: st, options });
+    }
+    return out;
+  }
 
   function cssPath(el) {
     const parts = [];
@@ -178,6 +221,7 @@
   }
 
   S.scan = scan;
+  S.inventory = inventory;
   S.byId = byId;
   S.describe = describe;
   S.resolve = resolve;
@@ -304,6 +348,14 @@
   }
 
   function renderCard(o) {
+    if (o.explore) {
+      card.innerHTML = `
+      <div class="top"><span class="mark"></span><span class="count">Scopos изучает продукт · действие ${o.step}</span></div>
+      <div class="text">${esc(o.instruction)}</div>
+      <div class="bar"><button class="btn" data-do="close">Остановить</button></div>
+      <div class="hint">Нажимаю только то, что открывает экраны и окна. Ничего не сохраняю и не отправляю.</div>`;
+      return;
+    }
     card.innerHTML = `
       <div class="top"><span class="mark"></span><span class="count">${o.total > 1 ? `Шаг ${o.step} из ${o.total}` : 'Scopos'}</span><button class="x" data-do="close" aria-label="Закрыть подсказку">×</button></div>
       <div class="text">${esc(o.instruction)}</div>
@@ -573,6 +625,263 @@
   S.recorder = { start: recStart, stop: recStop, active: () => !!rec };
 })(typeof window !== 'undefined' ? window : globalThis);
 
+// ---- extension/core/explore.js
+/*
+ * Scopos explorer: learns a product once, the way a new employee would, by
+ * walking through it. It visits every screen it can reach, records the full
+ * control tree of each one, and presses the controls that only open things
+ * (tabs, menus, "New …" buttons that show a form or a dialog) to see where they
+ * lead. The result is a product map: screens, dialogs and the controls that
+ * connect them. Guides are then written from the map, so answering a question
+ * later needs no page reading and no guessing about other pages.
+ *
+ * Safety: it never types, never submits a form, never presses anything that
+ * sounds like it changes data (delete, send, pay, save, confirm, log out …),
+ * never leaves the site, and closes every dialog it opens. Use a test account
+ * all the same, like you would for a new hire.
+ *
+ * The walk is a small state machine saved after every step through opts.store,
+ * so a full page load in the middle of it simply resumes on the next page.
+ */
+(function (root) {
+  const S = (root.Scopos = root.Scopos || {});
+
+  const DANGER = /удал|стер|delete|remove|erase|отправ|send|submit|оплат|pay|купить|buy|purchase|подтверд|confirm|сохран|save|apply|применить|выйти|выход|log ?out|sign ?out|архив|archive|отключ|disable|deactivat|сброс|reset|очист|clear|импорт|import|экспорт|export|скача|download|опубликов|publish|отозв|revoke|заблок|block|отмен[аи]ть подписк|cancel (plan|subscription)|terminate|уволить|закрыть сч/i;
+  const CLICKABLE_ROLES = /^(button|tab|menuitem|treeitem|summary|link)$/;
+  const LIMITS = { views: 40, probes: 160, perView: 30, ms: 5 * 60 * 1000 };
+
+  const wait = ms => new Promise(r => setTimeout(r, ms));
+  const lite = (() => { try { return (navigator.hardwareConcurrency || 8) <= 4 || (navigator.deviceMemory || 8) <= 4; } catch (e) { return false; } })();
+  // "/", "/#" and "/#/" are the same screen in hash-routed apps.
+  const pageKey = (u = location.href) => { const x = new URL(u, location.href); return x.pathname + (x.hash && x.hash !== '#' && x.hash !== '#/' ? x.hash : ''); };
+
+  // Resolves when the DOM has been quiet for `quiet` ms (or after `max`).
+  function settle(quiet = 280, max = 1800) {
+    return new Promise(resolve => {
+      let t = setTimeout(done, quiet);
+      const hard = setTimeout(done, max);
+      const mo = new MutationObserver(() => { clearTimeout(t); t = setTimeout(done, quiet); });
+      mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+      function done() { mo.disconnect(); clearTimeout(t); clearTimeout(hard); resolve(); }
+    });
+  }
+
+  function openDialogs() {
+    return [...document.querySelectorAll('dialog[open],[role=dialog],[aria-modal=true]')].filter(d => !S.pointer.isOurs(d) && d.getBoundingClientRect().width > 0);
+  }
+  const dialogTitle = d => {
+    const h = d.querySelector('h1,h2,h3,[role=heading],legend');
+    return (d.getAttribute('aria-label') || (h && h.textContent) || 'диалог').replace(/\s+/g, ' ').trim().slice(0, 60);
+  };
+
+  async function closeDialog(d) {
+    document.activeElement && document.activeElement.blur && document.activeElement.blur();
+    d.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await wait(120);
+    if (!d.isConnected || !openDialogs().includes(d)) return;
+    if (d.tagName === 'DIALOG' && d.open) { d.close(); await wait(60); return; }
+    const x = [...d.querySelectorAll('button,[role=button]')].find(b => /^(×|✕|x)$|закры|отмен|close|cancel|dismiss/i.test((b.getAttribute('aria-label') || b.textContent || '').trim()));
+    if (x) { x.click(); await wait(150); }
+  }
+
+  function linkTarget(el) {
+    if (el.tagName !== 'A' || !el.getAttribute('href')) return null;
+    if (el.hasAttribute('download')) return null;
+    let u;
+    try { u = new URL(el.getAttribute('href'), location.href); } catch (e) { return null; }
+    if (!/^https?:$/.test(u.protocol) || u.origin !== location.origin) return null;
+    return u.href;
+  }
+
+  // Can the explorer press this control to see what it opens?
+  function pressable(c) {
+    if (!CLICKABLE_ROLES.test(c.role) || DANGER.test(c.name) || /disabled/.test(c.state)) return false;
+    const el = c.el;
+    if (el.tagName === 'A') return false; // links are followed by address, never clicked
+    // A <button> reports type "submit" by default; it only submits something inside a form.
+    if ((el.type === 'submit' || el.type === 'reset') && (el.form || el.closest('form'))) return false;
+    if (el.tagName === 'INPUT' && /submit|reset|image/.test(el.type)) return false;
+    return true;
+  }
+
+  function captureView(v, container) {
+    const list = S.inventory(container);
+    v.title = container ? dialogTitle(container) : (document.querySelector('h1') || {}).textContent || document.title;
+    v.title = String(v.title).replace(/\s+/g, ' ').trim().slice(0, 80);
+    v.headings = [...(container || document).querySelectorAll('h1,h2,h3')].filter(h => !S.pointer.isOurs(h)).slice(0, 8).map(h => h.textContent.replace(/\s+/g, ' ').trim().slice(0, 60));
+    v.controls = list.map((c, i) => {
+      const href = linkTarget(c.el);
+      return {
+        ref: `${v.id}.${i + 1}`, role: c.role, name: c.name, section: c.section, state: c.state, options: c.options,
+        d: S.describe(c.el),
+        href: href || undefined,
+        probe: href ? 'link' : container ? 'skip' : pressable(c) ? undefined : 'skip',
+      };
+    });
+    v.captured = true;
+  }
+
+  let st = null, opts = null, stopping = false;
+
+  function addView(key, url, kind = 'page', parent) {
+    if (st.views[key]) return st.views[key];
+    if (Object.keys(st.views).length >= LIMITS.views) return null;
+    const v = { id: 'V' + (Object.keys(st.views).length + 1), key, url, kind, parent };
+    st.views[key] = v;
+    if (kind === 'page') st.queue.push(key);
+    return v;
+  }
+
+  const save = () => opts.store.save(st);
+  const progress = (label) => {
+    const views = Object.values(st.views).filter(v => v.captured).length;
+    if (opts.onProgress) opts.onProgress({ views, probes: st.probes, label });
+  };
+
+  async function goTo(url) {
+    if (pageKey() === pageKey(url)) return true;
+    const a = new URL(url, location.href), b = new URL(location.href);
+    await save();
+    if (a.origin + a.pathname + a.search === b.origin + b.pathname + b.search) {
+      location.hash = a.hash; // same document: the SPA re-renders in place
+      await settle();
+      return true;
+    }
+    location.href = url; // full load: the explorer resumes on the next page
+    return false;
+  }
+
+  function flash(el, label) {
+    S.pointer.point(el, { step: st.probes + 1, total: 0, instruction: label, explore: true, onClose: () => { stopping = true; } });
+  }
+
+  async function loop() {
+    while (!stopping) {
+      if (st.probes >= LIMITS.probes || Date.now() - st.startedAt > LIMITS.ms) break;
+      if (!st.cur) {
+        const key = st.queue.shift();
+        if (!key) break;
+        st.cur = { key };
+      }
+      const v = st.views[st.cur.key];
+      if (!(await goTo(v.url))) return; // page is reloading
+      if (pageKey() !== v.key) { st.cur = null; continue; } // redirected elsewhere
+      if (!v.captured) {
+        await settle();
+        captureView(v);
+        for (const c of v.controls) if (c.href) { const t = addView(pageKey(c.href), c.href); c.to = t ? t.key : pageKey(c.href); }
+        progress(`Экран «${v.title}»`);
+        await save();
+      }
+      const next = v.controls.find(c => c.probe === undefined);
+      if (!next || v.controls.filter(c => c.probe && c.probe !== 'skip' && c.probe !== 'link').length >= LIMITS.perView) { st.cur = null; await save(); continue; }
+      const r = await probe(v, next);
+      st.probes++;
+      await save();
+      if (r === 'reload') return;
+      progress(`Нажал «${next.name}»`);
+    }
+    await finish(stopping ? 'stopped' : 'done');
+  }
+
+  async function probe(v, c) {
+    const el = S.resolve(c.d);
+    if (!el) { c.probe = 'missing'; return; }
+    flash(el, `Изучаю: «${c.name}»`);
+    await wait(lite ? 200 : 520); // let the ring land so the walk is watchable
+    const beforeKey = pageKey(), beforeDialogs = openDialogs();
+    const expandedBefore = el.getAttribute('aria-expanded');
+    const before = new Set(S.inventory().map(x => x.el));
+    c.probe = 'pressed';
+    st.pending = { view: v.key, ref: c.ref };
+    await save(); // if the click loads another page, resume() records where it led
+    el.click();
+    await settle();
+    st.pending = null;
+    const afterKey = pageKey();
+    if (afterKey !== beforeKey) {
+      const t = addView(afterKey, location.href);
+      c.to = afterKey; c.kind = 'page';
+      if (t && !t.captured) { /* captured when its turn comes */ }
+      await goTo(v.url);
+      return;
+    }
+    const dlg = openDialogs().find(d => !beforeDialogs.includes(d));
+    if (dlg) {
+      const key = `${v.key} › ${dialogTitle(dlg)}`;
+      const dv = addView(key, v.url, 'dialog', v.key);
+      if (dv && !dv.captured) { captureView(dv, dlg); dv.opener = c.ref; }
+      c.to = key; c.kind = 'dialog';
+      await closeDialog(dlg);
+      await settle(150, 800);
+      return;
+    }
+    // A menu, a disclosure or an inline form: controls that appeared after the click.
+    const appeared = S.inventory().filter(x => !before.has(x.el));
+    if (appeared.length || (expandedBefore === 'false' && el.getAttribute('aria-expanded') === 'true')) {
+      const key = `${v.key} › ${c.name}`;
+      const mv = addView(key, v.url, 'panel', v.key);
+      if (mv && !mv.captured) {
+        mv.title = c.name; mv.headings = []; mv.opener = c.ref; mv.captured = true;
+        mv.controls = appeared.map((x, i) => ({ ref: `${mv.id}.${i + 1}`, role: x.role, name: x.name, section: x.section, state: x.state, options: x.options, d: S.describe(x.el), probe: 'skip' }));
+      }
+      c.to = key; c.kind = 'panel';
+      // Put the screen back the way it was for the next probe: collapse, Escape, or as a last resort reload.
+      if (el.isConnected && el.getAttribute('aria-expanded') === 'true') el.click();
+      else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await settle(150, 900);
+      if (appeared.some(x => x.el.isConnected && x.el.getBoundingClientRect().width > 0)) { st.probes++; await save(); location.reload(); return 'reload'; }
+      return;
+    }
+    c.probe = 'nothing';
+  }
+
+  async function finish(status) {
+    st.status = status;
+    st.finishedAt = Date.now();
+    await save();
+    S.pointer.hide();
+    if (opts.onDone) opts.onDone(toMap(st));
+  }
+
+  /** The stored map: what guides and answers are written from. */
+  function toMap(s) {
+    const views = Object.values(s.views).filter(v => v.captured);
+    return {
+      origin: s.origin, learnedAt: new Date().toISOString(), status: s.status, probes: s.probes,
+      views: views.map(v => ({ id: v.id, key: v.key, url: v.url, kind: v.kind, parent: v.parent ? s.views[v.parent] && s.views[v.parent].id : undefined, opener: v.opener, title: v.title, headings: v.headings,
+        controls: v.controls.map(c => ({ ref: c.ref, role: c.role, name: c.name, section: c.section, state: c.state, options: c.options, d: c.d, to: c.to && s.views[c.to] ? s.views[c.to].id : undefined })) })),
+    };
+  }
+
+  async function start(o) {
+    opts = o; stopping = false;
+    st = { status: 'running', origin: location.origin, startedAt: Date.now(), views: {}, queue: [], cur: null, probes: 0 };
+    addView(pageKey(), location.href);
+    await save();
+    progress('Начинаю');
+    return loop();
+  }
+
+  async function resume(o) {
+    opts = o; stopping = false;
+    st = await o.store.load();
+    if (!st || st.status !== 'running') return false;
+    await settle();
+    if (st.pending) {
+      // The last press loaded a new document: remember where it led.
+      const v = st.views[st.pending.view], c = v && v.controls.find(x => x.ref === st.pending.ref);
+      if (c && pageKey() !== v.key) { addView(pageKey(), location.href); c.to = pageKey(); c.kind = 'page'; }
+      st.pending = null;
+    }
+    loop();
+    return true;
+  }
+
+  S.explore = { start, resume, stop: () => { stopping = true; }, toMap, running: () => !!st && st.status === 'running' && !stopping };
+})(typeof window !== 'undefined' ? window : globalThis);
+
 // ---- sdk/widget.js
 /*
  * Scopos SDK widget: what a software vendor embeds for its own customers.
@@ -600,7 +909,7 @@
   };
   const KEY = 'scopos:run';
   let playbooks = Array.isArray(window.ScoposPlaybooks) ? window.ScoposPlaybooks : [];
-  let history = [];
+  let chat = []; // the last turns with Claude, for follow-up questions
   let state = null; // { question, answer, steps, index, source, status, error }
 
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -608,6 +917,50 @@
   const load = () => { try { return JSON.parse(sessionStorage.getItem(KEY) || 'null'); } catch (e) { return null; } };
 
   if (cfg.playbooksUrl) fetch(cfg.playbooksUrl).then(r => (r.ok ? r.json() : [])).then(list => { if (Array.isArray(list)) playbooks = list; }).catch(() => {});
+
+  // Guides the explorer and Claude wrote for this product (see learn mode below).
+  let learned = null; // { summary, guides, views, learnedAt }
+  const addLearned = k => {
+    learned = k && k.guides && k.guides.length ? k : null;
+    if (!learned) return;
+    const ids = new Set(learned.guides.map(g => g.id));
+    playbooks = [...learned.guides, ...playbooks.filter(p => !ids.has(p.id))];
+  };
+  fetch(cfg.endpoint + '/knowledge').then(r => (r.ok ? r.json() : null)).then(k => { addLearned(k); render(); }).catch(() => {});
+
+  // ---------- learn mode: the explorer walks the product once (open the page with ?scopos-learn=1) ----------
+  const LEARN_KEY = 'scopos:explore';
+  const exploreStore = {
+    load: async () => { try { return JSON.parse(sessionStorage.getItem(LEARN_KEY) || 'null'); } catch (e) { return null; } },
+    save: async st => { try { sessionStorage.setItem(LEARN_KEY, JSON.stringify(st)); } catch (e) {} },
+  };
+  let learning = null; // { views, probes, label } while exploring, { status:'writing'|'done'|'error', ... } after
+  const learnOpts = {
+    store: exploreStore,
+    onProgress: p => { learning = { status: 'exploring', ...p }; render(); },
+    onDone: async map => {
+      learning = { status: 'writing', views: map.views.length, probes: map.probes };
+      setOpen(true); render();
+      try {
+        const res = await fetch(cfg.endpoint + '/learn', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ map, product: cfg.product }) });
+        const out = await res.json();
+        if (!res.ok) throw new Error(out.error || 'Не получилось');
+        addLearned(out);
+        learning = { status: 'done', views: map.views.length, probes: map.probes, guides: out.guides.length, summary: out.summary };
+      } catch (e) {
+        learning = { status: 'error', error: e.message };
+      }
+      try { sessionStorage.removeItem(LEARN_KEY); } catch (e) {}
+      render();
+    },
+  };
+  function startLearning() {
+    S.guide.stop(false);
+    state = null; save();
+    learning = { status: 'exploring', views: 0, probes: 0, label: 'Начинаю' };
+    setOpen(false); render();
+    S.explore.start(learnOpts);
+  }
 
   // ---------- UI ----------
   const CSS_TEXT = `
@@ -673,10 +1026,18 @@ input:focus-visible { outline: none; }
 
   function render() {
     const launch = root.querySelector('.launch');
-    if (launch) launch.innerHTML = `<span class="ring"></span>${state && state.status === 'running' && state.steps.length ? `Шаг ${Math.min((state.index || 0) + 1, state.steps.length)} из ${state.steps.length}` : esc(cfg.label)}`;
+    if (launch) launch.innerHTML = `<span class="ring"></span>${learning && learning.status === 'exploring' ? `Изучаю · ${learning.views} экр.` : learning && learning.status === 'writing' ? 'Пишу гайды…' : state && state.status === 'running' && state.steps.length ? `Шаг ${Math.min((state.index || 0) + 1, state.steps.length)} из ${state.steps.length}` : esc(cfg.label)}`;
+    if (learning && learning.status !== 'exploring') {
+      body.innerHTML = learning.status === 'writing'
+        ? `<div class="think"><span class="spin"></span>Изучил ${learning.views} экранов и окон. Пишу готовые гайды…</div>`
+        : learning.status === 'error' ? `<div class="err">${esc(learning.error)}</div>`
+        : `<p class="a">Изучил продукт: ${learning.views} экранов и окон, ${learning.probes} проверенных кнопок.</p><p class="hi">${esc(learning.summary || '')}</p>
+           <div class="q">Готовые гайды · ${learning.guides}</div><div class="chips">${playbooks.filter(p => p.learned).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>`;
+      return;
+    }
     if (!state) {
       body.innerHTML = `<p class="hi">Спросите, как что-то сделать. Я покажу каждый шаг прямо здесь, на странице.</p>
-        ${playbooks.length ? `<div class="chips">${playbooks.slice(0, 4).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>` : ''}`;
+        ${playbooks.length ? `${learned ? `<div class="q">Готовые гайды · изучено ${learned.views} экранов</div>` : ''}<div class="chips">${playbooks.slice(0, learned ? 8 : 4).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>` : ''}`;
       return;
     }
     if (state.status === 'thinking') { body.innerHTML = `<div class="q">${esc(state.question)}</div><div class="think"><span class="spin"></span>Читаю страницу и продумываю шаги</div>`; return; }
@@ -684,7 +1045,7 @@ input:focus-visible { outline: none; }
     const idx = state.index || 0, done = state.status === 'done';
     body.innerHTML = `<div class="q">${esc(state.question)}</div>${state.answer ? `<p class="a">${esc(state.answer)}</p>` : ''}
       ${state.steps.length ? `<ol>${state.steps.map((s, i) => `<li class="${i < idx || done ? 'done' : i === idx ? 'cur' : ''}"><i>${i + 1}</i><span>${esc(s.instruction)}</span></li>`).join('')}</ol>` : ''}
-      <div class="meta">${state.source === 'playbook' ? 'Сценарий · мгновенно' : 'Ответ Claude'}${done ? ' · готово' : ''}</div>`;
+      <div class="meta">${state.source === 'playbook' ? 'Готовый гайд · мгновенно' : state.source === 'map' ? 'Claude · по карте продукта' : 'Ответ Claude'}${done ? ' · готово' : ''}</div>`;
   }
 
   function setOpen(on) { w.classList.toggle('open', on); if (on) setTimeout(() => input.focus(), 50); }
@@ -692,7 +1053,7 @@ input:focus-visible { outline: none; }
   root.addEventListener('click', e => {
     const b = e.target.closest('[data-do],[data-pb]');
     if (!b) return;
-    if (b.dataset.pb) { const pb = playbooks.find(p => p.id === b.dataset.pb); if (pb) runSteps(pb.name, `Сценарий «${pb.name}»`, pb.steps, 'playbook'); return; }
+    if (b.dataset.pb) { learning = null; const pb = playbooks.find(p => p.id === b.dataset.pb); if (pb) runSteps(pb.name, `Сценарий «${pb.name}»`, pb.steps, 'playbook'); return; }
     if (b.dataset.do === 'toggle') setOpen(!w.classList.contains('open'));
     if (b.dataset.do === 'close') setOpen(false);
   });
@@ -713,17 +1074,18 @@ input:focus-visible { outline: none; }
 
   async function ask(question) {
     S.guide.stop(false);
+    learning = null;
     const pb = matchPlaybook(question);
     if (pb) return runSteps(question, `Сценарий «${pb.name}»`, pb.steps, 'playbook');
     state = { question, status: 'thinking', steps: [] }; render();
     try {
       const page = S.scan();
-      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, page, history, product: cfg.product }) });
+      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question, page, history: chat, product: cfg.product }) });
       const out = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(out.error || `Сервер ответил ошибкой ${res.status}`);
-      history = [...history, { role: 'user', content: question }, { role: 'assistant', content: JSON.stringify(out) }].slice(-6);
-      const steps = toSteps(out.steps);
-      runSteps(question, out.answer, steps, 'claude');
+      chat = [...chat, { role: 'user', content: question }, { role: 'assistant', content: JSON.stringify(out) }].slice(-6);
+      const steps = out.ready ? out.steps : toSteps(out.steps);
+      runSteps(question, out.answer, steps, out.ready ? 'map' : 'claude');
     } catch (e) {
       state = { question, status: 'error', error: e.message || 'Не получилось ответить', steps: [] }; render();
     }
@@ -742,7 +1104,7 @@ input:focus-visible { outline: none; }
     replanned.add(index);
     const progress = state.steps.slice(0, index).map(s => s.instruction);
     try {
-      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: state.question, page: S.scan(), history, progress, product: cfg.product }) });
+      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: state.question, page: S.scan(), history: chat, progress, product: cfg.product }) });
       const out = res.ok ? await res.json() : null;
       if (!out || !state || state.index !== index) return;
       const rest = toSteps(out.steps || []);
@@ -777,13 +1139,19 @@ input:focus-visible { outline: none; }
     });
   }
 
-  function boot() {
+  async function boot() {
     (document.body || document.documentElement).appendChild(host);
     state = load();
     render();
+    if (await S.explore.resume(learnOpts)) { learning = { status: 'exploring', views: 0, probes: 0 }; render(); return; }
+    if (new URLSearchParams(location.search).has('scopos-learn')) {
+      const u = new URL(location.href); u.searchParams.delete('scopos-learn');
+      window.history.replaceState(null, '', u.href);
+      return startLearning();
+    }
     if (state && state.status === 'running' && state.index < state.steps.length) start(state.index);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 
-  S.widget = { open: () => setOpen(true), ask, cfg };
+  S.widget = { open: () => setOpen(true), ask, learn: startLearning, cfg };
 })();

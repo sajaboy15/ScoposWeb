@@ -12,7 +12,7 @@
   "host_permissions": ["<all_urls>"],
   "content_scripts": [{
     "matches": ["http://*/*", "https://*/*", "file:///*"],
-    "js": ["core/scan.js", "core/pointer.js", "core/guide.js", "content.js"],
+    "js": ["core/scan.js", "core/pointer.js", "core/guide.js", "core/explore.js", "content.js"],
     "run_at": "document_idle"
   }],
   "commands": {

@@ -8,6 +8,8 @@
 // GET  /            the demo app (Ledgerly)
 // GET  /dev/panel-preview.html  the extension's side panel with a stubbed chrome API
 // GET  /setup       paste the Claude key in a browser instead of an env var (saved to .scopos-key.local)
+// POST /api/scopos/learn      { map } from the explorer -> guides written by Claude (this machine only)
+// GET  /api/scopos/knowledge  learned guides for the widget; questions are then answered from the whole map
 //
 // The key stays on this server; browsers only ever talk to /api/scopos.
 // No dependencies beyond Node 20+.
@@ -23,6 +25,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const Brain = createRequire(import.meta.url)('../extension/core/brain.js');
 const PORT = +process.env.PORT || 4173;
 const KEY_FILE = join(root, '.scopos-key.local');
+const KNOWLEDGE_FILE = join(root, '.scopos-knowledge.local.json');
+let knowledge = (() => { try { return JSON.parse(readFileSync(KNOWLEDGE_FILE, 'utf8')); } catch (e) { return null; } })();
 let KEY = process.env.ANTHROPIC_API_KEY || (() => { try { return readFileSync(KEY_FILE, 'utf8').trim(); } catch (e) { return ''; } })();
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png' };
 
@@ -39,9 +43,9 @@ function json(res, code, data) {
   res.end(JSON.stringify(data));
 }
 
-async function readBody(req) {
+async function readBody(req, limit = 400_000) {
   let size = 0; const chunks = [];
-  for await (const c of req) { size += c.length; if (size > 400_000) throw new Error('too large'); chunks.push(c); }
+  for await (const c of req) { size += c.length; if (size > limit) throw new Error('too large'); chunks.push(c); }
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
 }
 
@@ -61,12 +65,36 @@ async function api(req, res) {
     const question = String(body.question || '').slice(0, 600);
     if (!question) return json(res, 400, { error: 'Пустой вопрос' });
     const history = Array.isArray(body.history) ? body.history.filter(t => (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string').slice(-6) : [];
+    const product = String(body.product || '').slice(0, 120);
+    // With a learned map, plan across every screen at once; the steps come back ready to run.
+    if (knowledge && knowledge.map && !body.progress) {
+      const current = Brain.viewOf(knowledge.map, String(body.page.url || ''));
+      const out = await Brain.call(Brain.buildAskMap({ question, map: knowledge.map, current, history, product }), KEY, { fromBrowser: false });
+      return json(res, 200, { answer: out.answer, steps: Brain.refSteps(out.steps, knowledge.map), ready: true });
+    }
     const progress = Array.isArray(body.progress) ? body.progress.filter(p => typeof p === 'string').slice(0, 20).map(p => p.slice(0, 200)) : [];
-    const out = await Brain.call(Brain.buildAsk({ question, page: body.page, history, progress, product: String(body.product || '').slice(0, 120) }), KEY, { fromBrowser: false });
+    const out = await Brain.call(Brain.buildAsk({ question, page: body.page, history, progress, product }), KEY, { fromBrowser: false });
     return json(res, 200, out);
   } catch (e) {
     return json(res, 502, { error: e.message || 'Claude не ответил' });
   }
+}
+
+const validMap = m => m && Array.isArray(m.views) && m.views.length <= 80 && m.views.every(v => v && Array.isArray(v.controls) && v.controls.length <= 400);
+
+async function learnApi(req, res) {
+  if (!loopback(req)) return json(res, 403, { error: 'Только с этого компьютера' });
+  if (!KEY) return json(res, 503, { error: 'Сначала подключите ключ на /setup' });
+  let body;
+  try { body = await readBody(req, 3_000_000); } catch (e) { return json(res, 400, { error: 'Неверный запрос' }); }
+  if (!validMap(body.map)) return json(res, 400, { error: 'Нет карты продукта' });
+  try {
+    const out = await Brain.call(Brain.buildLearn({ map: body.map, product: String(body.product || '').slice(0, 120) }), KEY, { fromBrowser: false });
+    const guides = out.guides.map((g, i) => ({ id: 'learned-' + (i + 1), name: g.name, learned: true, steps: Brain.refSteps(g.steps, body.map) })).filter(g => g.steps.length);
+    knowledge = { learnedAt: new Date().toISOString(), summary: out.summary, map: body.map, guides };
+    await writeFile(KNOWLEDGE_FILE, JSON.stringify(knowledge));
+    return json(res, 200, { summary: out.summary, guides, views: body.map.views.length });
+  } catch (e) { return json(res, 502, { error: e.message || 'Claude не ответил' }); }
 }
 
 // The folder to pick in chrome://extensions. When this server runs inside a packaged (MSIX) app, AppData\Roaming
@@ -122,6 +150,8 @@ createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
   if (url.pathname === '/api/scopos' && req.method === 'POST') return api(req, res);
   if (url.pathname === '/api/key') return keyApi(req, res);
+  if (url.pathname === '/api/scopos/learn' && req.method === 'POST') return learnApi(req, res);
+  if (url.pathname === '/api/scopos/knowledge') return json(res, 200, knowledge ? { learnedAt: knowledge.learnedAt, summary: knowledge.summary, guides: knowledge.guides, views: knowledge.map.views.length } : { guides: [] });
   if (url.pathname === '/setup') return file(res, 'demo/setup.html');
   if (url.pathname === '/scopos.js') { res.writeHead(200, { 'content-type': TYPES['.js'], 'cache-control': 'no-store' }); return res.end(build()); }
   if (url.pathname === '/' || url.pathname === '/index.html') return file(res, 'demo/index.html');
