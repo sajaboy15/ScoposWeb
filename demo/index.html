@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledgerly · демо для Scopos</title>
+<style>
+/* A stand-in vendor product: a small invoicing app with a sidebar, list views, a form and a dialog.
+   Neutral slate on white so the Scopos layer reads as a separate guide on top of it. */
+:root { --bg: #ffffff; --bg-2: #f6f7f9; --line: #e6e8ec; --text: #1d2330; --text-2: #5b6474; --text-3: #8d95a3; --brand: #3d5a80; --ok: #2f7d5b; --warn: #a86b12; color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root { --bg: #14171c; --bg-2: #1b1f26; --line: #2a2f38; --text: #e8ebf0; --text-2: #a7afbd; --text-3: #737c8b; --brand: #8fb0d8; --ok: #6cc59b; --warn: #e2a64a; color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
+.app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
+aside { border-right: 1px solid var(--line); padding: 18px 12px; background: var(--bg-2); }
+.logo { font-weight: 700; letter-spacing: -.02em; font-size: 17px; padding: 4px 10px 18px; display: flex; gap: 8px; align-items: center; }
+.logo i { width: 18px; height: 18px; border-radius: 5px; background: var(--brand); display: inline-block; }
+nav a { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; color: var(--text-2); text-decoration: none; margin-bottom: 2px; }
+nav a:hover { background: var(--line); color: var(--text); }
+nav a[aria-current="page"] { background: var(--bg); color: var(--text); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+main { padding: 26px 32px; min-width: 0; }
+header.page { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -.02em; }
+.btn { height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); cursor: pointer; font: inherit; font-weight: 500; }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-bottom: 22px; }
+.card { border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+.card b { display: block; font-size: 22px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.card span { color: var(--text-2); font-size: 13px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+th { color: var(--text-3); font-weight: 500; font-size: 12.5px; }
+td.num { font-variant-numeric: tabular-nums; }
+.st { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--bg-2); }
+.st.paid { color: var(--ok); } .st.due { color: var(--warn); }
+form.f { max-width: 520px; display: grid; gap: 14px; }
+label { display: grid; gap: 6px; font-weight: 500; font-size: 13px; }
+input, select { height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; font: inherit; background: var(--bg); color: var(--text); }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+.tabs a { padding: 8px 12px; color: var(--text-2); text-decoration: none; border-bottom: 2px solid transparent; }
+.tabs a[aria-selected="true"] { color: var(--text); border-bottom-color: var(--brand); }
+dialog { border: 1px solid var(--line); border-radius: 14px; padding: 20px; width: min(420px, 92vw); background: var(--bg); color: var(--text); }
+dialog::backdrop { background: rgba(20, 24, 32, .35); }
+.ok { padding: 12px 14px; border-radius: 10px; background: color-mix(in srgb, var(--ok) 12%, var(--bg)); color: var(--ok); margin-bottom: 16px; }
+.muted { color: var(--text-2); }
+@media (max-width: 760px) { .app { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } nav { display: flex; flex-wrap: wrap; gap: 4px; } .cards { grid-template-columns: 1fr; } main { padding: 18px 16px; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <div class="logo"><i></i>Ledgerly</div>
+    <nav aria-label="Разделы">
+      <a href="#/" data-r="/">Обзор</a>
+      <a href="#/invoices" data-r="/invoices">Счета</a>
+      <a href="#/clients" data-r="/clients">Клиенты</a>
+      <a href="#/settings" data-r="/settings">Настройки</a>
+    </nav>
+  </aside>
+  <main id="view"></main>
+</div>
+
+<script>
+// Demo scenarios, recorded with the Scopos extension and exported as JSON.
+window.ScoposPlaybooks = [
+  { id: 'invoice', name: 'Выставить счёт клиенту', steps: [
+    { instruction: 'Откройте раздел «Счета»', action: 'click', value: null, target: { sel: ['a[href="#/invoices"]'], text: 'Счета', role: 'link' } },
+    { instruction: 'Нажмите «Новый счёт»', action: 'click', value: null, target: { sel: ['#new-invoice'], text: 'Новый счёт', role: 'button' } },
+    { instruction: 'Выберите клиента', action: 'select', value: null, target: { sel: ['select[name="client"]'], text: 'Клиент', role: 'select' } },
+    { instruction: 'Укажите сумму счёта', action: 'type', value: null, target: { sel: ['input[name="amount"]'], text: 'Сумма, ₽', role: 'textbox' } },
+    { instruction: 'Выберите срок оплаты', action: 'select', value: null, target: { sel: ['select[name="due"]'], text: 'Срок оплаты', role: 'select' } },
+    { instruction: 'Нажмите «Отправить счёт»', action: 'click', value: null, target: { sel: ['#send-invoice'], text: 'Отправить счёт', role: 'button' } },
+  ] },
+  { id: 'invite', name: 'Пригласить коллегу в команду', steps: [
+    { instruction: 'Откройте «Настройки»', action: 'click', value: null, target: { sel: ['a[href="#/settings"]'], text: 'Настройки', role: 'link' } },
+    { instruction: 'Перейдите на вкладку «Команда»', action: 'click', value: null, target: { sel: ['#tab-team'], text: 'Команда', role: 'link' } },
+    { instruction: 'Нажмите «Пригласить коллегу»', action: 'click', value: null, target: { sel: ['#invite'], text: 'Пригласить коллегу', role: 'button' } },
+    { instruction: 'Введите рабочую почту коллеги', action: 'type', value: null, target: { sel: ['input[name="email"]'], text: 'Почта', role: 'textbox' } },
+    { instruction: 'Выберите роль', action: 'select', value: null, target: { sel: ['select[name="role"]'], text: 'Роль', role: 'select' } },
+    { instruction: 'Нажмите «Отправить приглашение»', action: 'click', value: null, target: { sel: ['#send-invite'], text: 'Отправить приглашение', role: 'button' } },
+  ] },
+];
+
+const clients = ['ООО «Северный ветер»', 'ИП Каримова', 'Bright Cargo LLC', 'Tashkent Foods'];
+const invoices = [
+  ['INV-1042', 'ООО «Северный ветер»', '128 400', 'paid'], ['INV-1043', 'Bright Cargo LLC', '56 000', 'due'],
+  ['INV-1044', 'ИП Каримова', '12 900', 'paid'], ['INV-1045', 'Tashkent Foods', '230 000', 'due'],
+];
+let flash = '';
+const views = {
+  '/': () => `<header class="page"><h1>Обзор</h1></header>
+    <div class="cards"><div class="card"><span>Выставлено за месяц</span><b>427 300 ₽</b></div><div class="card"><span>Оплачено</span><b>141 300 ₽</b></div><div class="card"><span>Ждут оплаты</span><b>2 счёта</b></div></div>
+    <p class="muted">Это демо-продукт. Нажмите «Спросить» внизу справа и попросите, например, «как выставить счёт» или «как пригласить коллегу».</p>`,
+  '/invoices': () => `${flash ? `<div class="ok">${flash}</div>` : ''}<header class="page"><h1>Счета</h1><button class="btn primary" id="new-invoice">Новый счёт</button></header>
+    <table><thead><tr><th>Номер</th><th>Клиент</th><th>Сумма, ₽</th><th>Статус</th></tr></thead><tbody>
+    ${invoices.map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="num">${r[2]}</td><td><span class="st ${r[3]}">${r[3] === 'paid' ? 'Оплачен' : 'Ждёт оплаты'}</span></td></tr>`).join('')}</tbody></table>`,
+  '/invoices/new': () => `<header class="page"><h1>Новый счёт</h1></header>
+    <form class="f" id="inv-form">
+      <label>Клиент<select name="client"><option value="">Выберите клиента</option>${clients.map(c => `<option>${c}</option>`).join('')}</select></label>
+      <label>Сумма, ₽<input name="amount" inputmode="numeric" placeholder="0"></label>
+      <label>Срок оплаты<select name="due"><option>7 дней</option><option>14 дней</option><option>30 дней</option></select></label>
+      <div><button class="btn primary" id="send-invoice" type="submit">Отправить счёт</button> <a class="btn" href="#/invoices" style="display:inline-grid;place-items:center;text-decoration:none">Отмена</a></div>
+    </form>`,
+  '/clients': () => `<header class="page"><h1>Клиенты</h1><button class="btn">Добавить клиента</button></header><table><tbody>${clients.map(c => `<tr><td>${c}</td></tr>`).join('')}</tbody></table>`,
+  '/settings': (tab = 'company') => `${flash ? `<div class="ok">${flash}</div>` : ''}<header class="page"><h1>Настройки</h1></header>
+    <div class="tabs" role="tablist"><a href="#/settings" role="tab" aria-selected="${tab === 'company'}">Компания</a><a href="#/settings/team" id="tab-team" role="tab" aria-selected="${tab === 'team'}">Команда</a><a href="#/settings/billing" role="tab" aria-selected="${tab === 'billing'}">Оплата</a></div>
+    ${tab === 'team' ? `<header class="page"><span class="muted">3 участника</span><button class="btn primary" id="invite">Пригласить коллегу</button></header>
+      <table><tbody><tr><td>Азамат</td><td class="muted">Владелец</td></tr><tr><td>Дилноза</td><td class="muted">Бухгалтер</td></tr><tr><td>Тимур</td><td class="muted">Менеджер</td></tr></tbody></table>
+      <dialog id="dlg"><form method="dialog" class="f" id="inv-dlg"><h1 style="font-size:18px">Пригласить коллегу</h1>
+        <label>Почта<input name="email" type="email" placeholder="name@company.com"></label>
+        <label>Роль<select name="role"><option>Менеджер</option><option>Бухгалтер</option><option>Только просмотр</option></select></label>
+        <div><button class="btn primary" id="send-invite" value="ok">Отправить приглашение</button> <button class="btn" value="cancel">Отмена</button></div></form></dialog>`
+      : tab === 'billing' ? '<p class="muted">Тариф «Команда», следующее списание 1 ноября.</p>' : '<form class="f"><label>Название компании<input value="Ledgerly Demo"></label><label>ИНН<input placeholder="10 или 12 цифр"></label></form>'}`,
+};
+function route() {
+  const path = location.hash.slice(1) || '/';
+  const v = document.getElementById('view');
+  if (path.startsWith('/settings')) v.innerHTML = views['/settings'](path.split('/')[2] || 'company');
+  else v.innerHTML = (views[path] || views['/'])();
+  document.querySelectorAll('nav a').forEach(a => a.setAttribute('aria-current', path === a.dataset.r || (a.dataset.r !== '/' && path.startsWith(a.dataset.r)) ? 'page' : 'false'));
+  flash = '';
+}
+document.addEventListener('click', e => {
+  if (e.target.id === 'new-invoice') location.hash = '#/invoices/new';
+  if (e.target.id === 'invite') document.getElementById('dlg').showModal();
+});
+document.addEventListener('submit', e => {
+  if (e.target.id === 'inv-form') { e.preventDefault(); flash = 'Счёт отправлен клиенту'; location.hash = '#/invoices'; }
+  if (e.target.id === 'inv-dlg') { setTimeout(() => { flash = 'Приглашение отправлено'; route(); }, 0); }
+});
+addEventListener('hashchange', route);
+route();
+</script>
+<script src="/scopos.js" data-endpoint="/api/scopos" data-product="Ledgerly, счета и платежи"></script>
+</body>
+</html>

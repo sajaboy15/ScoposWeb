@@ -1,0 +1,154 @@
+/*
+ * Scopos brain: the one Claude request behind every answer.
+ *
+ * Shared by the extension's service worker (importScripts), the embeddable SDK
+ * (bundled) and the Node proxy (require). It only builds the request body and
+ * parses the reply; whoever owns the API key sends it.
+ *
+ * The model never sees pixels. It gets a compact text map of the page: every
+ * visible control with a numeric id, its role, its accessible name and the
+ * section it sits in. It answers with ordered steps that point at those ids,
+ * plus the element's visible text so the step can be found again after a
+ * navigation or a release that reshuffles the DOM.
+ */
+(function (root) {
+  const MODEL = 'claude-opus-5-5';
+  const API_URL = 'https://api.anthropic.com/v1/messages';
+  const API_VERSION = '2023-06-01';
+  // Refusals are retried server-side on the model Anthropic recommends for that category.
+  const BETA = 'server-side-fallback-2026-07-01';
+
+  const SYSTEM = `you are Scopos, a product guide that lives inside a web app and helps its users get things done.
+
+you get a map of the page the user is looking at: one line per visible control, as
+[id] role "name" · section · state
+plus the page title, url and headings. the user asks how to do something, or asks a question about the product.
+
+ANSWER AS STEPS
+- break the task into the actions the user performs, in order, one action per step.
+- if the right control is not on this page yet, the first steps are how to get there (open a menu, a tab, a link).
+- each instruction is one short sentence phrased as an action, naming the control the way it is labeled on screen: "Нажмите «Новый счёт»", "Click Save at the bottom".
+- element_id is the id from the map for that step's control, or null when the control is not on this page. never invent an id; a wrong pointer is worse than none.
+- element_text is the visible label of the control (also for steps on later pages, as your best expectation of its label), or null.
+- action: click, type (fill a field), select (pick an option), or look (just read something).
+- value: what to type or select, only when the user told you or it is obvious; otherwise null.
+- if the user only asks a question, answer it in "answer" and return an empty steps list.
+
+"answer" is one or two plain sentences: what the user will achieve, or the answer to their question.
+reply in the user's language. no markdown.`;
+
+  const SCHEMA = {
+    type: 'object',
+    properties: {
+      answer: { type: 'string' },
+      steps: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            instruction: { type: 'string' },
+            element_id: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+            element_text: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+            action: { type: 'string', enum: ['click', 'type', 'select', 'look'] },
+            value: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          },
+          required: ['instruction', 'element_id', 'element_text', 'action', 'value'],
+          additionalProperties: false,
+        },
+      },
+    },
+    required: ['answer', 'steps'],
+    additionalProperties: false,
+  };
+
+  // A smaller request used to re-find one control after the UI changed.
+  const LOCATE_SCHEMA = {
+    type: 'object',
+    properties: { element_id: { anyOf: [{ type: 'integer' }, { type: 'null' }] } },
+    required: ['element_id'],
+    additionalProperties: false,
+  };
+
+  function pageText(page) {
+    const head = [
+      `title: ${page.title || ''}`,
+      `url: ${page.url || ''}`,
+      page.headings && page.headings.length ? `headings: ${page.headings.join(' | ')}` : '',
+    ].filter(Boolean).join('\n');
+    return `${head}\n\ncontrols:\n${page.lines.join('\n')}`;
+  }
+
+  function buildAsk({ question, page, history = [], product = '' }) {
+    const messages = history.slice(-6).map(t => ({ role: t.role, content: t.content }));
+    messages.push({
+      role: 'user',
+      content: [
+        { type: 'text', text: (product ? `product: ${product}\n` : '') + pageText(page) },
+        { type: 'text', text: question },
+      ],
+    });
+    return body(SYSTEM, messages, SCHEMA, 'low');
+  }
+
+  function buildLocate({ instruction, oldText, page }) {
+    const messages = [{
+      role: 'user',
+      content: `${pageText(page)}\n\nwhich control on this page does this step mean? step: "${instruction}". it used to be labeled "${oldText || ''}". answer with its id, or null if it is not on this page.`,
+    }];
+    return body('you match a guide step to a control on a web page. answer only with the id from the map.', messages, LOCATE_SCHEMA, 'low');
+  }
+
+  function body(system, messages, schema, effort) {
+    return {
+      model: MODEL,
+      max_tokens: 16000,
+      system,
+      messages,
+      thinking: { type: 'adaptive' },
+      fallbacks: 'default',
+      output_config: { effort, format: { type: 'json_schema', schema } },
+    };
+  }
+
+  function headers(apiKey, fromBrowser) {
+    const h = {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': API_VERSION,
+      'anthropic-beta': BETA,
+    };
+    // Calls from an extension or page carry an Origin; the API asks callers to opt in explicitly.
+    if (fromBrowser) h['anthropic-dangerous-direct-browser-access'] = 'true';
+    return h;
+  }
+
+  /** Turns a Messages API response into the parsed JSON object, or throws a readable error. */
+  function parse(data) {
+    if (data.stop_reason === 'refusal') throw new Error('Claude отказался отвечать на этот вопрос. Переформулируйте его.');
+    if (data.stop_reason === 'max_tokens') throw new Error('Ответ получился слишком длинным. Спросите про одно действие за раз.');
+    const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    try { return JSON.parse(text); } catch (e) { throw new Error('Не удалось разобрать ответ модели.'); }
+  }
+
+  async function call(requestBody, apiKey, { fromBrowser = true, signal } = {}) {
+    let res;
+    try {
+      res = await fetch(API_URL, { method: 'POST', headers: headers(apiKey, fromBrowser), body: JSON.stringify(requestBody), signal });
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw e;
+      throw new Error('Нет связи с Claude API. Проверьте интернет.');
+    }
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      if (res.status === 401) throw new Error('Ключ API не подошёл. Замените его в настройках.');
+      if (res.status === 429) throw new Error('Слишком много запросов. Подождите минуту.');
+      if (res.status === 400 && /credit/i.test(detail)) throw new Error('На аккаунте Anthropic закончились средства.');
+      throw new Error(`Claude API ответил ошибкой ${res.status}.`);
+    }
+    return parse(await res.json());
+  }
+
+  const Brain = { MODEL, buildAsk, buildLocate, call, parse, headers, API_URL };
+  if (typeof module === 'object' && module.exports) module.exports = Brain;
+  root.ScoposBrain = Brain;
+})(typeof globalThis !== 'undefined' ? globalThis : this);

@@ -1,0 +1,11 @@
+{
+  "name": "scopos-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scopos: AI-гид внутри веб-продуктов. Расширение для Chrome и встраиваемый скрипт.",
+  "scripts": {
+    "build": "node sdk/build.mjs",
+    "demo": "node server/server.mjs"
+  },
+  "engines": { "node": ">=20" }
+}

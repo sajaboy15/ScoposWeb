@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scopos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="mark" aria-hidden="true"></span><span>Scopos</span></div>
+  <span class="site" id="site" title=""></span>
+</header>
+<nav class="tabs" role="tablist">
+  <button role="tab" id="tab-ask" aria-selected="true" data-view="ask">Спросить</button>
+  <button role="tab" id="tab-pb" aria-selected="false" data-view="pb">Сценарии <span class="num" id="pb-num"></span></button>
+  <button role="tab" id="tab-set" aria-selected="false" data-view="set">Настройки</button>
+  <span class="glider" aria-hidden="true"></span>
+</nav>
+
+<main>
+  <!-- ask -->
+  <section class="view" id="view-ask">
+    <div class="feed" id="feed"></div>
+  </section>
+
+  <!-- playbooks -->
+  <section class="view" id="view-pb" hidden>
+    <div class="pb-head">
+      <div>
+        <h2>Сценарии этого сайта</h2>
+        <p class="muted">Сохранённые инструкции повторяются мгновенно, без обращения к модели. Если интерфейс поменяется, Scopos сам найдёт новые кнопки.</p>
+      </div>
+      <button class="btn main" id="rec-start">Записать новый</button>
+    </div>
+    <div id="rec-box" hidden></div>
+    <div class="pb-tools row"><button class="btn ghost" id="pb-export" title="JSON для data-playbooks встраиваемого скрипта">Экспорт для своего сайта</button></div>
+    <div class="pb-list" id="pb-list"></div>
+  </section>
+
+  <!-- settings -->
+  <section class="view" id="view-set" hidden>
+    <h2>Ключ Claude</h2>
+    <p class="muted">Scopos отвечает через Claude. Ключ хранится только в этом браузере и уходит только в API Anthropic. Создать его можно на console.anthropic.com в разделе API keys.</p>
+    <div class="keyrow">
+      <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" aria-label="Ключ Anthropic API">
+      <button class="btn main" id="key-save">Сохранить</button>
+    </div>
+    <div class="keystate" id="key-state"></div>
+
+    <h2>Что видит модель</h2>
+    <p class="muted">Только названия кнопок, ссылок и полей на открытой странице и их разделы. Без скриншотов, без введённого текста и паролей.</p>
+
+    <h2>Быстрый вызов</h2>
+    <p class="muted"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> открывает панель. Поменять сочетание можно на странице chrome://extensions/shortcuts.</p>
+    <p class="faint small">Модель: Claude Opus 5.5 · Scopos 0.1.0</p>
+  </section>
+</main>
+
+<form class="composer" id="composer" autocomplete="off">
+  <textarea id="q" rows="1" placeholder="Как это сделать?" aria-label="Вопрос"></textarea>
+  <button class="send" id="send" type="submit" aria-label="Спросить"><span></span></button>
+</form>
+
+<script src="sidepanel.js"></script>
+</body>
+</html>
