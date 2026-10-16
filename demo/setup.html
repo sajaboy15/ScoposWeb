@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scopos · запуск</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600&display=swap">
+<style>
+/* One quiet column: three numbered steps to get Scopos running locally. */
+:root { --paper: #fbfaf7; --paper-2: #f3efe8; --ink: #2b2825; --ink-2: #6d675f; --ink-3: #a39c92; --rule: #ebe6de; --accent: #c47f56; --accent-ink: #9a5d3a; --accent-soft: rgba(196,127,86,.14); --ok: #5f8b5d; --bad: #b5584c; --shadow: 0 10px 30px rgba(60,45,30,.07); --f: "Onest", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color-scheme: light; }
+@media (prefers-color-scheme: dark) { :root { --paper: #1f1c19; --paper-2: #282420; --ink: #efe9e1; --ink-2: #bdb4a9; --ink-3: #8b8278; --rule: #35302a; --accent: #e0a07a; --accent-ink: #f0bb98; --accent-soft: rgba(224,160,122,.16); --ok: #9cc097; --bad: #e08d81; --shadow: 0 10px 30px rgba(0,0,0,.35); color-scheme: dark; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.55 var(--f); -webkit-font-smoothing: antialiased; }
+.wrap { max-width: 620px; margin: 0 auto; padding: 56px max(20px, env(safe-area-inset-right, 0px)) 80px max(20px, env(safe-area-inset-left, 0px)); }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 600; margin-bottom: 40px; }
+.mark { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--accent); position: relative; }
+.mark::after { content: ""; position: absolute; inset: 0; margin: auto; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+h1 { font-size: clamp(28px, 5vw, 38px); line-height: 1.12; font-weight: 500; letter-spacing: -.025em; margin: 0 0 12px; text-wrap: balance; }
+.lead { color: var(--ink-2); margin: 0 0 40px; max-width: 52ch; }
+.step { display: grid; grid-template-columns: 34px 1fr; gap: 16px; padding: 26px 0; border-top: 1px solid var(--rule); }
+.n { width: 30px; height: 30px; border-radius: 50%; border: 1.5px solid var(--rule); display: grid; place-items: center; font-size: 13px; color: var(--ink-3); font-variant-numeric: tabular-nums; transition: background .3s, border-color .3s, color .3s; }
+.step.done .n { background: var(--accent); border-color: var(--accent); color: var(--paper); }
+h2 { font-size: 17px; font-weight: 600; margin: 3px 0 6px; }
+p { margin: 0 0 14px; color: var(--ink-2); }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--rule); border-radius: 14px; padding: 0 14px; background: var(--paper); color: var(--ink); font: inherit; }
+input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.btn { height: 44px; padding: 0 18px; border-radius: 999px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font: inherit; font-weight: 500; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; transition: background .15s, transform .2s cubic-bezier(.22,.9,.24,1); }
+.btn:hover { background: var(--paper-2); }
+.btn.main { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.btn.main:hover { opacity: .9; background: var(--ink); transform: translateY(-1px); }
+.btn.soft { background: var(--accent-soft); border-color: transparent; color: var(--accent-ink); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn[disabled] { opacity: .5; cursor: default; transform: none; }
+.state { margin-top: 12px; font-size: 13.5px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; min-height: 24px; color: var(--ink-2); }
+.pill { border-radius: 999px; padding: 2px 10px; font-size: 12.5px; }
+.pill.ok { background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); }
+.pill.need { background: var(--accent-soft); color: var(--accent-ink); }
+.pill.bad { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.link { color: var(--ink-2); background: none; border: 0; font: inherit; font-size: 13.5px; text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--rule); cursor: pointer; padding: 0; }
+ol { margin: 0 0 14px; padding-left: 20px; color: var(--ink-2); }
+ol li { margin-bottom: 6px; }
+code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background: var(--paper-2); border-radius: 6px; padding: 2px 6px; color: var(--ink); overflow-wrap: anywhere; }
+.path { display: flex; gap: 8px; align-items: center; background: var(--paper-2); border-radius: 14px; padding: 10px 10px 10px 14px; }
+.path code { background: none; padding: 0; flex: 1; min-width: 0; }
+.note { font-size: 13px; color: var(--ink-3); }
+.spin { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: spin .9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="mark" aria-hidden="true"></span>Scopos</div>
+  <h1>Три шага, и Scopos ведёт по любому сайту</h1>
+  <p class="lead">Ключ Claude хранится только на этом компьютере, в файле рядом с проектом. В браузер и на чужие серверы он не уходит, только в API Anthropic.</p>
+
+  <section class="step" id="s1">
+    <span class="n">1</span>
+    <div>
+      <h2>Подключите Claude</h2>
+      <p>Вставьте ключ из console.anthropic.com → API keys. Он начинается с <code>sk-ant-</code>.</p>
+      <form class="row" id="key-form" autocomplete="off">
+        <input id="key" type="password" spellcheck="false" placeholder="sk-ant-…" aria-label="Ключ Anthropic API">
+        <button class="btn main" type="submit">Сохранить</button>
+      </form>
+      <div class="state" id="key-state"></div>
+    </div>
+  </section>
+
+  <section class="step" id="s2">
+    <span class="n">2</span>
+    <div>
+      <h2>Попробуйте на демо-продукте</h2>
+      <p>Ledgerly это маленький сервис счетов. Нажмите «Спросить» внизу справа и задайте любой вопрос своими словами, например «как добавить нового клиента» или «где сменить тариф».</p>
+      <a class="btn soft" href="/" id="open-demo">Открыть Ledgerly</a>
+    </div>
+  </section>
+
+  <section class="step" id="s3">
+    <span class="n">3</span>
+    <div>
+      <h2>Поставьте расширение в Chrome</h2>
+      <p>С ним Scopos работает на любом сайте, не только на демо.</p>
+      <ol>
+        <li>Откройте <code>chrome://extensions</code> и включите «Режим разработчика» справа вверху.</li>
+        <li>Нажмите «Загрузить распакованное» и выберите эту папку:</li>
+      </ol>
+      <div class="path"><code id="ext-path">…</code><button class="btn" id="copy-path" type="button">Скопировать</button></div>
+      <ol start="3" style="margin-top:12px">
+        <li>Нажмите на значок Scopos на панели Chrome (или <code>Alt+Shift+S</code>), откройте «Настройки» и вставьте тот же ключ.</li>
+      </ol>
+      <p class="note">Chrome разрешает ставить расширения из папки только вручную, поэтому этот шаг за вами.</p>
+    </div>
+  </section>
+</div>
+<script>
+const $ = s => document.querySelector(s);
+const api = (method, body) => fetch('/api/key', { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(r => r.json());
+
+function show(info, extra = '') {
+  $('#s1').classList.toggle('done', !!info.set);
+  $('#key-state').innerHTML = info.set
+    ? `<span class="pill ok">Подключено · …${info.last4}</span><button class="link" id="test">Проверить ключ</button>${info.fromEnv ? '' : '<button class="link" id="del">Удалить</button>'}${extra}`
+    : `<span class="pill need">Ключ не подключён</span>${extra}`;
+  if (info.extensionPath) $('#ext-path').textContent = info.extensionPath;
+  $('#key').placeholder = info.set ? '••••••••' + info.last4 : 'sk-ant-…';
+}
+let info = {};
+api('GET').then(i => { info = i; show(i); if (!i.set) $('#key').focus(); });
+
+$('#key-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const key = $('#key').value.trim();
+  if (!key) return;
+  const res = await api('POST', { key });
+  $('#key').value = '';
+  if (res.error) return show(info, `<span class="pill bad">${res.error}</span>`);
+  info = { ...info, ...res };
+  show(info);
+  test();
+});
+async function test() {
+  show(info, '<span class="spin" aria-hidden="true"></span><span>Проверяю…</span>');
+  const res = await api('POST', { test: true });
+  show(info, res.ok ? '<span class="pill ok">Claude отвечает</span>' : `<span class="pill bad">${(res.error || 'Не получилось').replace(/[<>&]/g, '')}</span>`);
+  if (res.ok) { $('#s2').classList.add('done'); }
+}
+$('#key-state').addEventListener('click', async e => {
+  if (e.target.id === 'test') test();
+  if (e.target.id === 'del') { info = { ...info, ...(await api('DELETE', {})) }; show(info); }
+});
+$('#copy-path').addEventListener('click', () => {
+  const t = $('#ext-path').textContent;
+  try { navigator.clipboard.writeText(t).then(() => { $('#copy-path').textContent = 'Скопировано'; setTimeout(() => $('#copy-path').textContent = 'Скопировать', 1500); }); }
+  catch (e) { getSelection().selectAllChildren($('#ext-path')); }
+});
+</script>
+</body>
+</html>
