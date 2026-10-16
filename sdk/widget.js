@@ -146,14 +146,35 @@ input:focus-visible { outline: none; }
       const out = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(out.error || `Сервер ответил ошибкой ${res.status}`);
       history = [...history, { role: 'user', content: question }, { role: 'assistant', content: JSON.stringify(out) }].slice(-6);
-      const steps = out.steps.map(s => {
-        const el = s.element_id != null ? S.byId(s.element_id) : null;
-        return { instruction: s.instruction, action: s.action, value: s.value, target: el ? S.describe(el) : s.element_text ? { sel: [], text: s.element_text, role: null } : null };
-      });
+      const steps = toSteps(out.steps);
       runSteps(question, out.answer, steps, 'claude');
     } catch (e) {
       state = { question, status: 'error', error: e.message || 'Не получилось ответить', steps: [] }; render();
     }
+  }
+
+  // Claude's ids point at this page's controls; steps for later pages carry only the label it expects.
+  const toSteps = list => list.map(s => {
+    const el = s.element_id != null ? S.byId(s.element_id) : null;
+    return { instruction: s.instruction, action: s.action, value: s.value, target: el ? S.describe(el) : s.element_text ? { sel: [], text: s.element_text, role: null } : null };
+  });
+
+  // The user reached a page where the expected control isn't: plan the rest from what is on screen now.
+  const replanned = new Set();
+  async function replan(index) {
+    if (!state || replanned.has(index)) return;
+    replanned.add(index);
+    const progress = state.steps.slice(0, index).map(s => s.instruction);
+    try {
+      const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question: state.question, page: S.scan(), history, progress, product: cfg.product }) });
+      const out = res.ok ? await res.json() : null;
+      if (!out || !state || state.index !== index) return;
+      const rest = toSteps(out.steps || []);
+      state.steps = state.steps.slice(0, index).concat(rest);
+      if (!rest.length) { state.status = 'done'; state.index = index; S.guide.stop(false); save(); render(); return; }
+      save(); render();
+      start(index);
+    } catch (e) { /* keep waiting; the card still shows the instruction */ }
   }
 
   function runSteps(question, answer, steps, source) {
@@ -168,8 +189,9 @@ input:focus-visible { outline: none; }
       index,
       onChange: ({ index: i }) => { if (!state) return; state.index = Math.min(i, state.steps.length); if (i >= state.steps.length) state.status = 'done'; save(); render(); },
       onEnd: reason => { if (!state) return; state.status = reason === 'done' ? 'done' : 'answered'; if (reason === 'done') state.index = state.steps.length; save(); render(); },
-      onMissing: async (step) => {
-        if (state.source !== 'playbook') return null;
+      missingDelay: state.source === 'claude' ? 1200 : 2500,
+      onMissing: async (step, i) => {
+        if (state.source === 'claude') { replan(i); return null; }
         // Re-find a moved control through the vendor's server (one small request).
         const res = await fetch(cfg.endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ locate: { instruction: step.instruction, oldText: step.target && step.target.text }, page: S.scan() }) }).catch(() => null);
         const out = res && res.ok ? await res.json() : null;

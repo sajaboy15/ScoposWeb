@@ -10,14 +10,15 @@
   const S = window.Scopos;
   const send = msg => chrome.runtime.sendMessage(msg).catch(() => null);
 
-  function startGuide(steps, index) {
+  function startGuide(steps, index, missingDelay) {
     S.guide.start(steps, {
       index,
+      missingDelay,
       onChange: ({ index: i }) => send({ type: 'guide:change', index: i }),
       onEnd: reason => send({ type: 'guide:end', reason }),
       onMissing: async (step, index) => {
         const page = S.scan();
-        const res = await send({ type: 'guide:missing', step, page });
+        const res = await send({ type: 'guide:missing', step, index, page });
         if (!res || res.id == null) return null;
         const el = S.byId(res.id);
         const target = el ? S.describe(el) : null;
@@ -32,7 +33,7 @@
       case 'ping': reply({ ok: true }); break;
       case 'scan': reply(S.scan()); break;
       case 'describe': reply(msg.ids.map(id => (id == null ? null : S.describe(S.byId(id))))); break;
-      case 'guide:start': startGuide(msg.steps, msg.index || 0); reply({ ok: true }); break;
+      case 'guide:start': startGuide(msg.steps, msg.index || 0, msg.missingDelay); reply({ ok: true }); break;
       case 'guide:go': S.guide.go(msg.index); reply({ ok: true }); break;
       case 'guide:stop': S.guide.stop(false); reply({ ok: true }); break;
       case 'record:start':
@@ -51,5 +52,5 @@
   });
 
   // Resume a walkthrough that continues on this page.
-  send({ type: 'resume' }).then(res => { if (res && res.steps) startGuide(res.steps, res.index); });
+  send({ type: 'resume' }).then(res => { if (res && res.steps) startGuide(res.steps, res.index, res.missingDelay); });
 })();

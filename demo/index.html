@@ -10,6 +10,7 @@
 :root { --bg: #ffffff; --bg-2: #f6f7f9; --line: #e6e8ec; --text: #1d2330; --text-2: #5b6474; --text-3: #8d95a3; --brand: #3d5a80; --ok: #2f7d5b; --warn: #a86b12; color-scheme: light; }
 @media (prefers-color-scheme: dark) { :root { --bg: #14171c; --bg-2: #1b1f26; --line: #2a2f38; --text: #e8ebf0; --text-2: #a7afbd; --text-3: #737c8b; --brand: #8fb0d8; --ok: #6cc59b; --warn: #e2a64a; color-scheme: dark; } }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); }
 .app { display: grid; grid-template-columns: 220px 1fr; min-height: 100vh; }
 aside { border-right: 1px solid var(--line); padding: 18px 12px; background: var(--bg-2); }
@@ -87,6 +88,7 @@ const invoices = [
   ['INV-1044', 'ИП Каримова', '12 900', 'paid'], ['INV-1045', 'Tashkent Foods', '230 000', 'due'],
 ];
 let flash = '';
+let plan = 'Команда';
 const views = {
   '/': () => `<header class="page"><h1>Обзор</h1></header>
     <div class="cards"><div class="card"><span>Выставлено за месяц</span><b>427 300 ₽</b></div><div class="card"><span>Оплачено</span><b>141 300 ₽</b></div><div class="card"><span>Ждут оплаты</span><b>2 счёта</b></div></div>
@@ -110,7 +112,12 @@ const views = {
         <label>Почта<input name="email" type="email" placeholder="name@company.com"></label>
         <label>Роль<select name="role"><option>Менеджер</option><option>Бухгалтер</option><option>Только просмотр</option></select></label>
         <div><button class="btn primary" id="send-invite" value="ok">Отправить приглашение</button> <button class="btn" value="cancel">Отмена</button></div></form></dialog>`
-      : tab === 'billing' ? '<p class="muted">Тариф «Команда», следующее списание 1 ноября.</p>' : '<form class="f"><label>Название компании<input value="Ledgerly Demo"></label><label>ИНН<input placeholder="10 или 12 цифр"></label></form>'}`,
+      : tab === 'billing' ? `<div class="cards" style="grid-template-columns:minmax(0,1fr)"><div class="card"><span>Текущий тариф</span><b>${plan}</b><span>Следующее списание 1 ноября</span></div></div>
+        <button class="btn primary" id="change-plan">Сменить тариф</button>
+        <form class="f" id="plan-form" hidden style="margin-top:18px">
+          <label>Новый тариф<select name="plan">${['Старт · 990 ₽', 'Команда · 2 900 ₽', 'Бизнес · 7 900 ₽'].map(p => `<option${p.startsWith(plan) ? ' selected' : ''}>${p}</option>`).join('')}</select></label>
+          <div><button class="btn primary" id="confirm-plan" type="submit">Подтвердить</button></div>
+        </form>` : '<form class="f"><label>Название компании<input value="Ledgerly Demo"></label><label>ИНН<input placeholder="10 или 12 цифр"></label></form>'}`,
 };
 function route() {
   const path = location.hash.slice(1) || '/';
@@ -123,9 +130,11 @@ function route() {
 document.addEventListener('click', e => {
   if (e.target.id === 'new-invoice') location.hash = '#/invoices/new';
   if (e.target.id === 'invite') document.getElementById('dlg').showModal();
+  if (e.target.id === 'change-plan') { document.getElementById('plan-form').hidden = false; e.target.hidden = true; }
 });
 document.addEventListener('submit', e => {
   if (e.target.id === 'inv-form') { e.preventDefault(); flash = 'Счёт отправлен клиенту'; location.hash = '#/invoices'; }
+  if (e.target.id === 'plan-form') { e.preventDefault(); plan = e.target.plan.value.split(' · ')[0]; flash = `Тариф изменён на «${plan}»`; route(); }
   if (e.target.id === 'inv-dlg') { setTimeout(() => { flash = 'Приглашение отправлено'; route(); }, 0); }
 });
 addEventListener('hashchange', route);

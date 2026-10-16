@@ -78,13 +78,20 @@ reply in the user's language. no markdown.`;
     return `${head}\n\ncontrols:\n${page.lines.join('\n')}`;
   }
 
-  function buildAsk({ question, page, history = [], product = '' }) {
+  /**
+   * progress: instructions the user already completed. The page map is then the page they reached,
+   * and the model plans only the remaining steps from here (used when a guessed control isn't on the new page).
+   */
+  function buildAsk({ question, page, history = [], product = '', progress = [] }) {
     const messages = history.slice(-6).map(t => ({ role: t.role, content: t.content }));
+    const done = progress.length
+      ? `\n\nthe user is in the middle of this task and already did:\n${progress.map((p, i) => `${i + 1}. ${p}`).join('\n')}\nthe map above is the page they are on now. return only the remaining steps, starting from this page.`
+      : '';
     messages.push({
       role: 'user',
       content: [
         { type: 'text', text: (product ? `product: ${product}\n` : '') + pageText(page) },
-        { type: 'text', text: question },
+        { type: 'text', text: question + done },
       ],
     });
     return body(SYSTEM, messages, SCHEMA, 'low');

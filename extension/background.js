@@ -101,9 +101,11 @@ async function ask(tabId, question) {
   return start(tabId, { question, answer: out.answer, steps, source: 'claude', ms: Date.now() - t0, origin, history: nextHistory });
 }
 
+const delayFor = source => (source === 'claude' ? 1200 : 2500);
+
 async function start(tabId, data) {
   const session = await setSession(tabId, { ...data, index: 0, status: data.steps.length ? 'running' : 'answered', error: null });
-  if (data.steps.length) await toTab(tabId, { type: 'guide:start', steps: data.steps, index: 0 });
+  if (data.steps.length) await toTab(tabId, { type: 'guide:start', steps: data.steps, index: 0, missingDelay: delayFor(data.source) });
   return session;
 }
 
@@ -111,6 +113,24 @@ async function bumpRuns(origin, id) {
   const list = await getPlaybooks(origin);
   const pb = list.find(p => p.id === id);
   if (pb) { pb.runs = (pb.runs || 0) + 1; await setPlaybooks(origin, list); }
+}
+
+// A Claude answer reached a page where its guessed control isn't: plan the remaining steps from this page.
+async function replan(tabId, index, page) {
+  const s = await getSession(tabId);
+  const apiKey = await getKey();
+  if (!s || !apiKey || s.replanned === index) return;
+  await setSession(tabId, { replanned: index });
+  const progress = s.steps.slice(0, index).map(st => st.instruction);
+  const out = await Brain.call(Brain.buildAsk({ question: s.question, page, history: s.history || [], progress }), apiKey);
+  const cur = await getSession(tabId);
+  if (!cur || cur.index !== index) return;
+  const descriptors = await toTab(tabId, { type: 'describe', ids: out.steps.map(st => st.element_id) });
+  const rest = out.steps.map((st, i) => ({ instruction: st.instruction, action: st.action, value: st.value, target: descriptors[i] || (st.element_text ? { sel: [], text: st.element_text, role: null } : null) }));
+  const steps = cur.steps.slice(0, index).concat(rest);
+  if (!rest.length) { await toTab(tabId, { type: 'guide:stop' }); await setSession(tabId, { steps, index, status: 'done' }); return; }
+  await setSession(tabId, { steps });
+  await toTab(tabId, { type: 'guide:start', steps, index, missingDelay: delayFor('claude') });
 }
 
 // The UI changed and a step's control can't be found: ask Claude for that one control and fix the saved walkthrough.
@@ -154,7 +174,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       case 'go': {
         const s = await getSession(msg.tabId);
         if (!s) return reply({});
-        await toTab(msg.tabId, s.status === 'running' ? { type: 'guide:go', index: msg.index } : { type: 'guide:start', steps: s.steps, index: msg.index });
+        await toTab(msg.tabId, s.status === 'running' ? { type: 'guide:go', index: msg.index } : { type: 'guide:start', steps: s.steps, index: msg.index, missingDelay: delayFor(s.source) });
         return reply({ session: await setSession(msg.tabId, { index: msg.index, status: 'running' }) });
       }
       case 'playbooks': return reply({ list: await getPlaybooks(msg.origin) });
@@ -189,7 +209,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         if (!fromTab) return reply({});
         const s = await getSession(fromTab);
         if (s && s.status === 'recording') { await toTab(fromTab, { type: 'record:start' }); return reply({}); }
-        return reply(s && s.status === 'running' && s.index < s.steps.length ? { steps: s.steps, index: s.index } : {});
+        return reply(s && s.status === 'running' && s.index < s.steps.length ? { steps: s.steps, index: s.index, missingDelay: delayFor(s.source) } : {});
       }
       case 'guide:change': {
         const s = await getSession(fromTab);
@@ -202,8 +222,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
         if (s) await setSession(fromTab, { status: msg.reason === 'done' ? 'done' : 'answered', index: msg.reason === 'done' ? s.steps.length : s.index });
         return reply({});
       }
-      case 'guide:missing':
+      case 'guide:missing': {
+        const s = await getSession(fromTab);
+        if (s && s.source === 'claude') { replan(fromTab, msg.index, msg.page).catch(() => {}); return reply({ id: null }); }
         try { return reply(await heal(fromTab, msg.step, msg.page)); } catch (e) { return reply({ id: null }); }
+      }
       case 'guide:healed': await storeHealed(fromTab, msg.index, msg.target); return reply({});
       case 'record:step': {
         const s = await getSession(fromTab);

@@ -61,7 +61,8 @@ async function api(req, res) {
     const question = String(body.question || '').slice(0, 600);
     if (!question) return json(res, 400, { error: 'Пустой вопрос' });
     const history = Array.isArray(body.history) ? body.history.filter(t => (t.role === 'user' || t.role === 'assistant') && typeof t.content === 'string').slice(-6) : [];
-    const out = await Brain.call(Brain.buildAsk({ question, page: body.page, history, product: String(body.product || '').slice(0, 120) }), KEY, { fromBrowser: false });
+    const progress = Array.isArray(body.progress) ? body.progress.filter(p => typeof p === 'string').slice(0, 20).map(p => p.slice(0, 200)) : [];
+    const out = await Brain.call(Brain.buildAsk({ question, page: body.page, history, progress, product: String(body.product || '').slice(0, 120) }), KEY, { fromBrowser: false });
     return json(res, 200, out);
   } catch (e) {
     return json(res, 502, { error: e.message || 'Claude не ответил' });

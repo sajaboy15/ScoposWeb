@@ -114,7 +114,7 @@
       run.healed.add(at);
       const found = await run.opts.onMissing(step, at).catch(() => null);
       if (found && run && run.index === at) { step.target = found; show(); }
-    }, 2500);
+    }, run.opts.missingDelay || 2500);
     run.cleanup.push(() => { mo.disconnect(); removeEventListener('hashchange', onNav); removeEventListener('popstate', onNav); clearTimeout(heal); });
   }
 
