@@ -2,3 +2,4 @@ node_modules/
 .DS_Store
 .scopos-key.local
 .scopos-knowledge.local.json
+*.lnk
