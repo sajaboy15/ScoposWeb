@@ -106,7 +106,7 @@ const views = {
   '/clients': () => `<header class="page"><h1>Клиенты</h1><button class="btn">Добавить клиента</button></header><table><tbody>${clients.map(c => `<tr><td>${c}</td></tr>`).join('')}</tbody></table>`,
   '/settings': (tab = 'company') => `${flash ? `<div class="ok">${flash}</div>` : ''}<header class="page"><h1>Настройки</h1></header>
     <div class="tabs" role="tablist"><a href="#/settings" role="tab" aria-selected="${tab === 'company'}">Компания</a><a href="#/settings/team" id="tab-team" role="tab" aria-selected="${tab === 'team'}">Команда</a><a href="#/settings/billing" role="tab" aria-selected="${tab === 'billing'}">Оплата</a></div>
-    ${tab === 'team' ? `<header class="page"><span class="muted">3 участника</span><button class="btn primary" id="invite">Пригласить коллегу</button></header>
+    ${tab === 'team' ? `<header class="page"><span class="muted">3 участника</span><button class="btn primary" id="invite" aria-haspopup="dialog">Пригласить коллегу</button></header>
       <table><tbody><tr><td>Азамат</td><td class="muted">Владелец</td></tr><tr><td>Дилноза</td><td class="muted">Бухгалтер</td></tr><tr><td>Тимур</td><td class="muted">Менеджер</td></tr></tbody></table>
       <dialog id="dlg"><form method="dialog" class="f" id="inv-dlg"><h1 style="font-size:18px">Пригласить коллегу</h1>
         <label>Почта<input name="email" type="email" placeholder="name@company.com"></label>
@@ -140,6 +140,6 @@ document.addEventListener('submit', e => {
 addEventListener('hashchange', route);
 route();
 </script>
-<script src="/scopos.js" data-endpoint="/api/scopos" data-product="Ledgerly, счета и платежи"></script>
+<script src="/scopos.js" data-endpoint="/api/scopos" data-product="Ledgerly, счета и платежи" data-learn></script>
 </body>
 </html>

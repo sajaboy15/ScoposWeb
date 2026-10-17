@@ -4,9 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scopos · запуск</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Onest:wght@400;500;600&display=swap">
 <style>
 /* One quiet column: three numbered steps to get Scopos running locally. */
 :root { --paper: #fbfaf7; --paper-2: #f3efe8; --ink: #2b2825; --ink-2: #6d675f; --ink-3: #a39c92; --rule: #ebe6de; --accent: #c47f56; --accent-ink: #9a5d3a; --accent-soft: rgba(196,127,86,.14); --ok: #5f8b5d; --bad: #b5584c; --shadow: 0 10px 30px rgba(60,45,30,.07); --f: "Onest", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color-scheme: light; }
@@ -75,7 +72,7 @@ code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background
     <div>
       <h2>Научите Scopos продукту</h2>
       <p>Scopos один раз сам пройдёт по Ledgerly: откроет каждый экран, вкладку и окно и запомнит все кнопки и поля. Потом Claude напишет по этой карте готовые гайды. Они работают мгновенно и без токенов, а новые вопросы отвечаются по всей карте сразу.</p>
-      <p class="note">Агент нажимает только то, что открывает экраны и окна. Он ничего не заполняет, не сохраняет и не отправляет.</p>
+      <p class="note">Агент нажимает только то, что открывает экраны и окна. Он ничего не заполняет, не сохраняет и не отправляет. Перед стартом Scopos спросит подтверждение в своём окне.</p>
       <a class="btn main" href="/?scopos-learn=1">Изучить Ledgerly</a>
       <div class="state" id="learn-state"></div>
     </div>
@@ -109,23 +106,28 @@ code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background
 </div>
 <script>
 const $ = s => document.querySelector(s);
-const api = (method, body) => fetch('/api/key', { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(r => r.json());
+// Server text never goes into the page as markup.
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const api = (method, body) => fetch('/api/key', { method, headers: { 'content-type': 'application/json' }, body: body ? JSON.stringify(body) : undefined })
+  .then(r => r.json().catch(() => ({ error: `Сервер ответил ошибкой ${r.status}` })))
+  .catch(() => ({ error: 'Сервер не отвечает. Он запущен?' }));
 
 function show(info, extra = '') {
   $('#s1').classList.toggle('done', !!info.set);
   $('#key-state').innerHTML = info.set
-    ? `<span class="pill ok">Подключено · …${info.last4}</span><button class="link" id="test">Проверить ключ</button>${info.fromEnv ? '' : '<button class="link" id="del">Удалить</button>'}${extra}`
+    ? `<span class="pill ok">Подключено · …${esc(info.last4)}</span><button class="link" id="test">Проверить ключ</button>${info.fromEnv ? '' : '<button class="link" id="del">Удалить</button>'}${extra}`
     : `<span class="pill need">Ключ не подключён</span>${extra}`;
   if (info.extensionPath) $('#ext-path').textContent = info.extensionPath;
   $('#key').placeholder = info.set ? '••••••••' + info.last4 : 'sk-ant-…';
+  if (info.error && !info.set) $('#key-state').innerHTML += `<span class="pill bad">${esc(info.error)}</span>`;
 }
 let info = {};
 api('GET').then(i => { info = i; show(i); if (!i.set) $('#key').focus(); });
 fetch('/api/scopos/knowledge').then(r => r.json()).then(k => {
   if (!k.guides || !k.guides.length) return;
   $('#s2').classList.add('done');
-  $('#learn-state').innerHTML = `<span class="pill ok">Изучено ${k.views} экранов · ${k.guides.length} гайдов</span>`;
-});
+  $('#learn-state').innerHTML = `<span class="pill ok">Изучено ${esc(k.views)} экранов · ${esc(k.guides.length)} гайдов</span>`;
+}).catch(() => {});
 
 $('#key-form').addEventListener('submit', async e => {
   e.preventDefault();
@@ -133,7 +135,7 @@ $('#key-form').addEventListener('submit', async e => {
   if (!key) return;
   const res = await api('POST', { key });
   $('#key').value = '';
-  if (res.error) return show(info, `<span class="pill bad">${res.error}</span>`);
+  if (res.error) return show(info, `<span class="pill bad">${esc(res.error)}</span>`);
   info = { ...info, ...res };
   show(info);
   test();
@@ -141,12 +143,22 @@ $('#key-form').addEventListener('submit', async e => {
 async function test() {
   show(info, '<span class="spin" aria-hidden="true"></span><span>Проверяю…</span>');
   const res = await api('POST', { test: true });
-  show(info, res.ok ? '<span class="pill ok">Claude отвечает</span>' : `<span class="pill bad">${(res.error || 'Не получилось').replace(/[<>&]/g, '')}</span>`);
+  show(info, res.ok ? '<span class="pill ok">Claude отвечает</span>' : `<span class="pill bad">${esc(res.error || 'Не получилось')}</span>`);
   if (res.ok) { $('#s2').classList.add('done'); }
 }
+// Deleting the key takes two clicks: «Удалить» arms a separate «Да, удалить» button for a few seconds.
+let delTimer = 0;
 $('#key-state').addEventListener('click', async e => {
-  if (e.target.id === 'test') test();
-  if (e.target.id === 'del') { info = { ...info, ...(await api('DELETE', {})) }; show(info); }
+  if (!e.isTrusted) return;
+  const id = e.target.id;
+  if (id === 'test') test();
+  if (id === 'del') {
+    clearTimeout(delTimer);
+    show(info, '<span>Удалить ключ с этого компьютера?</span><button class="link" id="del-yes">Да, удалить</button><button class="link" id="del-no">Оставить</button>');
+    delTimer = setTimeout(() => show(info), 6000);
+  }
+  if (id === 'del-no') { clearTimeout(delTimer); show(info); }
+  if (id === 'del-yes') { clearTimeout(delTimer); info = { ...info, ...(await api('DELETE', {})) }; show(info); }
 });
 $('#copy-path').addEventListener('click', () => {
   const t = $('#ext-path').textContent;

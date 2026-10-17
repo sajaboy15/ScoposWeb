@@ -3,3 +3,4 @@ node_modules/
 .scopos-key.local
 .scopos-knowledge.local.json
 *.lnk
+.scopos-answers.local.json

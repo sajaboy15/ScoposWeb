@@ -2,78 +2,121 @@
 (() => {
   const $ = s => document.querySelector(s);
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const bg = msg => chrome.runtime.sendMessage(msg);
+  // Every request to the worker resolves: a dead worker or a closed port becomes { error }.
+  const bg = async msg => {
+    try { return (await chrome.runtime.sendMessage(msg)) || {}; } catch (e) { return { error: 'Scopos не ответил. Попробуйте ещё раз.' }; }
+  };
 
   let tab = null;        // { id, url, origin, host }
   let session = null;    // the service worker's session for this tab
   let playbooks = [];
   let view = 'ask';
   let saving = false;    // "save as scenario" form open
+  let saveName = '';
   let thinkTimer = 0;
+  let progress = null;   // { runId, chars, steps, answer } while Claude streams the answer
+  let loadSeq = 0;
+  let recEdits = {};     // edited instructions while recording
 
-  // ---------- active tab ----------
+  // ---------- active tab: the panel always shows the session of the tab in front ----------
   async function loadTab() {
-    const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!t) return;
+    const seq = ++loadSeq;
+    let t = null;
+    try { [t] = await chrome.tabs.query({ active: true, currentWindow: true }); } catch (e) { t = null; }
+    if (seq !== loadSeq || !t) return;
     let origin = '', host = '';
-    try { const u = new URL(t.url); origin = u.origin; host = u.host || u.protocol.replace(':', ''); } catch (e) {}
+    try { const u = new URL(t.url); origin = u.origin === 'null' ? '' : u.origin; host = u.host || u.protocol.replace(':', ''); } catch (e) { /* no url */ }
+    const switched = !tab || tab.id !== t.id;
     tab = { id: t.id, url: t.url, origin, host };
     $('#site').textContent = host;
     $('#site').title = t.url || '';
-    session = (await bg({ type: 'session', tabId: tab.id })).session;
+    if (switched) { saving = false; progress = null; }
+    const res = await bg({ type: 'session', tabId: t.id });
+    if (seq !== loadSeq) return;
+    session = res.session || null;
     await loadPlaybooks();
     await loadLearn();
+    if (seq !== loadSeq) return;
     render();
+    if (view === 'set') renderUsage();
   }
+
   // ---------- learning ----------
-  let learn = null, hasMap = false;
+  let learn = null, hasMap = false, learnChars = 0;
   async function loadLearn() {
-    if (!tab || !tab.origin) { learn = null; return; }
+    if (!tab || !tab.origin) { learn = null; hasMap = false; return; }
     const r = await bg({ type: 'learn:state', origin: tab.origin });
-    learn = r.learn; hasMap = r.hasMap;
+    learn = r.learn || null; hasMap = !!r.hasMap;
+    if (learn && learn.chars) learnChars = learn.chars;
   }
+  const redo = `<div class="row links"><button class="link" data-learn="restart">Изучить заново</button><button class="link" data-learn="forget">Забыть</button></div>`;
   function renderLearn() {
     const box = $('#learn-box');
     if (!box) return;
     const L = learn || {};
     if (L.status === 'exploring') {
       box.innerHTML = `<h3>Изучаю продукт</h3><div class="stat"><div><b>${L.views || 0}</b><span>экранов</span></div><div><b>${L.probes || 0}</b><span>кнопок проверено</span></div></div>
-        <div class="now"><span class="spin"></span><span>${esc(L.label || '')}</span></div><button class="btn ghost" data-learn="stop">Остановить</button>`;
+        <div class="now"><span class="spin"></span><span>${esc(L.label || 'Хожу по экранам')}</span></div>
+        <div class="row"><button class="btn soft" data-learn="finish">Хватит, писать гайды</button><button class="btn ghost" data-learn="stop">Отменить</button></div>${redo}`;
     } else if (L.status === 'writing') {
-      box.innerHTML = `<h3>Пишу гайды</h3><p>Изучил ${L.views} экранов и окон. Claude пишет по карте готовые инструкции.</p><div class="now"><span class="spin"></span><span>Обычно это 20–40 секунд</span></div>`;
+      box.innerHTML = `<h3>Пишу гайды</h3><p>Изучил ${L.views || 0} экранов и окон. Claude пишет по карте готовые инструкции, обычно за минуту-две.</p>
+        <div class="now"><span class="spin"></span><span id="learn-now">${learnText()}</span></div>${redo}`;
     } else if (L.status === 'done' || L.status === 'mapped') {
       const when = L.at ? new Date(L.at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : '';
-      box.innerHTML = `<h3>Продукт изучен${when ? ' · ' + when : ''}</h3><div class="stat"><div><b>${L.views}</b><span>экранов и окон</span></div><div><b>${L.guides || 0}</b><span>готовых гайдов</span></div></div>
-        ${L.summary ? `<p>${esc(L.summary)}</p>` : ''}${L.error ? `<p>${esc(L.error)}</p>` : ''}
-        <div class="row"><button class="btn ghost" data-learn="start">Изучить заново</button><button class="btn ghost" data-learn="forget">Забыть</button></div>`;
+      box.innerHTML = `<h3>Продукт изучен${when ? ' · ' + when : ''}</h3><div class="stat"><div><b>${L.views || 0}</b><span>экранов и окон</span></div><div><b>${L.guides || 0}</b><span>готовых гайдов</span></div></div>
+        ${L.summary ? `<p>${esc(L.summary)}</p>` : ''}${L.error ? `<p>${esc(L.error)}</p>` : ''}${L.dropped ? `<p class="faint small">${L.dropped} ${L.dropped === 1 ? 'гайд отброшен' : 'гайдов отброшено'}: в них были кнопки, которых нет на карте.</p>` : ''}
+        <div class="row"><button class="btn ghost" data-learn="restart">Изучить заново</button><button class="btn ghost" data-learn="forget">Забыть</button></div>`;
+    } else if (L.status === 'stopped' || (L.status === 'error' && hasMap)) {
+      box.innerHTML = `<h3>${L.status === 'stopped' ? 'Изучение остановлено' : 'Не получилось дописать гайды'}</h3>
+        ${L.error ? `<p style="color:var(--bad)">${esc(L.error)}</p>` : '<p>Ничего не сохранено. Можно начать заново в любой момент.</p>'}
+        <div class="row"><button class="btn main" data-learn="restart">Изучить заново</button>${hasMap || L.status === 'error' ? '<button class="btn ghost" data-learn="forget">Забыть</button>' : ''}</div>`;
     } else {
       box.innerHTML = `<h3>Научите Scopos этому сайту</h3><p>Scopos один раз сам пройдёт по всем экранам, вкладкам и окнам и запомнит каждую кнопку. Потом Claude напишет готовые гайды. Они работают мгновенно, а новые вопросы получают точные шаги по всему продукту.</p>
         ${L.status === 'error' ? `<p style="color:var(--bad)">${esc(L.error)}</p>` : ''}
-        <button class="btn main" data-learn="start">Изучить продукт</button>
-        <p class="faint small" style="margin:10px 0 0">Нажимаю только то, что открывает экраны и окна. Ничего не заполняю, не сохраняю и не отправляю. Лучше запускать под тестовым аккаунтом.</p>`;
+        <button class="btn main" data-learn="${L.status === 'error' ? 'restart' : 'start'}">${L.status === 'error' ? 'Изучить заново' : 'Изучить продукт'}</button>
+        <p class="faint small" style="margin:10px 0 0">Нажимаю только то, что открывает экраны и окна. Ничего не заполняю, не сохраняю и не отправляю: пока я хожу по сайту, отправка форм и запросов на запись заблокирована. Лучше запускать под тестовым аккаунтом.</p>`;
     }
   }
+  const learnText = () => (learnChars ? `Claude пишет гайды · ${learnChars.toLocaleString('ru-RU')} символов` : 'Claude читает карту продукта');
   $('#learn-box').addEventListener('click', async e => {
     const b = e.target.closest('[data-learn]');
     if (!b || !tab) return;
-    if (b.dataset.learn === 'start') { const r = await bg({ type: 'learn:start', tabId: tab.id }); if (r && r.error) flash(r.error); }
-    if (b.dataset.learn === 'stop') await bg({ type: 'learn:stop', tabId: tab.id });
-    if (b.dataset.learn === 'forget') { await bg({ type: 'learn:forget', origin: tab.origin }); await loadLearn(); await loadPlaybooks(); renderLearn(); renderPlaybooks(); }
+    const act = b.dataset.learn;
+    let r = {};
+    if (act === 'start' || act === 'restart') { learnChars = 0; r = await bg({ type: 'learn:start', tabId: tab.id, restart: act === 'restart' }); }
+    if (act === 'stop') r = await bg({ type: 'learn:stop', tabId: tab.id, origin: tab.origin });
+    if (act === 'finish') { r = await bg({ type: 'learn:finish', tabId: tab.id, origin: tab.origin }); if (!r.error) flash('Останавливаюсь и передаю карту Claude'); }
+    if (act === 'forget') { r = await bg({ type: 'learn:forget', origin: tab.origin }); if (!r.error) flash('Карта и гайды этого сайта забыты'); }
+    if (r && r.error) flash(r.error);
+    await loadLearn(); await loadPlaybooks(); renderLearn(); renderPlaybooks();
   });
 
   async function loadPlaybooks() {
     playbooks = tab && tab.origin ? (await bg({ type: 'playbooks', origin: tab.origin })).list || [] : [];
     $('#pb-num').textContent = playbooks.length ? playbooks.length : '';
   }
-  chrome.tabs.onActivated.addListener(loadTab);
-  chrome.tabs.onUpdated.addListener((id, info) => { if (tab && id === tab.id && info.status === 'complete') loadTab(); });
+  chrome.tabs.onActivated.addListener(() => loadTab());
+  chrome.tabs.onUpdated.addListener((id, info) => { if (tab && id === tab.id && (info.status === 'complete' || info.url)) loadTab(); });
+  chrome.windows && chrome.windows.onFocusChanged && chrome.windows.onFocusChanged.addListener(() => loadTab());
   chrome.runtime.onMessage.addListener(msg => {
-    if (msg.type === 'session' && tab && msg.tabId === tab.id) { session = msg.session; render(); }
-    if (msg.type === 'record:stop-request' && tab && msg.tabId === tab.id) stopRecording();
-    if (msg.type === 'learn' && tab && msg.origin === tab.origin) {
+    if (!tab) return;
+    if (msg.type === 'session' && msg.tabId === tab.id) {
+      session = msg.session;
+      if (!session || session.status !== 'thinking') progress = null;
+      render();
+    }
+    if (msg.type === 'progress' && msg.tabId === tab.id && session && session.status === 'thinking' && (!session.runId || session.runId === msg.runId)) {
+      progress = msg; updateThinking();
+    }
+    if (msg.type === 'record:stop-request' && msg.tabId === tab.id) stopRecording();
+    if (msg.type === 'learn' && msg.origin === tab.origin) {
       learn = msg.learn;
-      if (learn.status === 'done') loadPlaybooks().then(() => { renderPlaybooks(); render(); });
+      if (learn && learn.status === 'done') loadPlaybooks().then(() => { renderPlaybooks(); render(); });
       if (view === 'pb') renderLearn();
+    }
+    if (msg.type === 'learn:progress' && msg.origin === tab.origin) {
+      learnChars = msg.chars;
+      const el = $('#learn-now'); if (el) el.textContent = learnText();
     }
   });
 
@@ -90,7 +133,7 @@
     $('#view-set').hidden = v !== 'set';
     $('#composer').hidden = v !== 'ask';
     if (v === 'pb') renderPlaybooks();
-    if (v === 'set') renderKey();
+    if (v === 'set') { renderKey(); renderUsage(); }
   }
   document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setView(b.dataset.view); });
 
@@ -103,42 +146,60 @@
     e.preventDefault();
     const text = q.value.trim();
     if (!text || !tab) return;
+    if (session && session.status === 'thinking') return;
     q.value = ''; autosize();
     await askQuestion(text);
   });
-  async function askQuestion(text) {
-    saving = false;
-    session = { question: text, status: 'thinking', steps: [], index: 0 };
+  async function askQuestion(text, force = false) {
+    if (!tab) return;
+    const tabId = tab.id;
+    saving = false; progress = null;
+    session = { question: text, status: 'thinking', steps: [], index: 0, startedAt: Date.now(), tabId };
     render();
-    const res = await bg({ type: 'ask', tabId: tab.id, question: text });
-    if (res && res.error) session = { question: text, status: 'error', error: res.error, steps: [] };
-    else if (res && res.session) session = res.session;
+    const res = await bg({ type: 'ask', tabId, question: text, force });
+    // The user switched tabs, asked again or pressed Stop meanwhile: that state is already on screen.
+    if (!tab || tab.id !== tabId || res.stale || res.aborted) return;
+    if (res.error) session = { question: text, status: 'error', error: res.error, steps: [], tabId };
+    else if (res.session) session = res.session;
     render();
   }
 
+  const secs = ms => (ms / 1000).toFixed(1).replace('.', ',') + ' с';
   function render() {
     if (view === 'pb') renderPlaybooks();
     const feed = $('#feed');
-    const busy = session && session.status === 'thinking';
-    $('#composer').classList.toggle('busy', !!busy);
-    $('#send').disabled = !!busy;
+    const busy = !!(session && session.status === 'thinking');
+    $('#composer').classList.toggle('busy', busy);
+    $('#send').disabled = busy;
     clearInterval(thinkTimer);
-    if (!session || session.status === 'recording' && view === 'ask') { feed.innerHTML = hello(); return; }
+    if (!session || session.status === 'recording') { feed.innerHTML = hello(); return; }
     if (busy) {
-      feed.innerHTML = `<div class="q">${esc(session.question)}</div><div class="thinking"><span class="spin"></span><span id="think-t">Читаю страницу</span></div>`;
-      const t0 = Date.now();
-      thinkTimer = setInterval(() => { const el = $('#think-t'); if (el) el.textContent = Date.now() - t0 > 1400 ? 'Продумываю шаги' : 'Читаю страницу'; }, 400);
+      feed.innerHTML = `<div class="q">${esc(session.question)}</div><div id="think"></div>`;
+      updateThinking();
+      thinkTimer = setInterval(updateThinking, 400);
       return;
     }
     if (session.status === 'error') {
       const needKey = /ключ/i.test(session.error || '');
-      feed.innerHTML = `${session.question ? `<div class="q">${esc(session.question)}</div>` : ''}<div class="error">${esc(session.error)}${needKey ? '<div><button class="btn main" data-act="open-settings">Открыть настройки</button></div>' : ''}</div>`;
+      feed.innerHTML = `${session.question ? `<div class="q">${esc(session.question)}</div>` : ''}<div class="error">${esc(session.error || 'Что-то пошло не так.')}
+        <div class="row">${needKey ? '<button class="btn main" data-act="open-settings">Открыть настройки</button>' : ''}${session.question ? `<button class="btn ${needKey ? 'ghost' : 'main'}" data-act="retry">Спросить ещё раз</button>` : ''}<button class="btn ghost" data-act="new">Новый вопрос</button></div></div>`;
+      return;
+    }
+    if (session.status === 'suggest') {
+      const list = session.suggestions || [];
+      feed.innerHTML = `<div class="q">${esc(session.question)}</div><p class="answer">Возможно, вы про:</p>
+        <div class="chips">${list.map(p => `<button class="chip pb" data-run="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>
+        <div class="actions row"><button class="btn ghost" data-act="ask-anyway">Нет, спросить Claude</button></div>`;
       return;
     }
     const steps = session.steps || [];
     const idx = session.index || 0;
     const done = session.status === 'done';
     const fast = session.source === 'playbook';
+    const cached = session.source === 'cache';
+    const tag = fast ? '<span class="tag fast">Готовый гайд · мгновенно · 0 токенов</span>'
+      : cached ? '<span class="tag fast">мгновенно · из кэша</span><button class="link" data-act="refresh" title="Забыть сохранённый ответ и спросить Claude">Спросить заново</button>'
+      : `<span class="tag">Claude${session.source === 'map' ? ' · по карте продукта' : ''}${session.ms ? ' · ' + secs(session.ms) : ''}</span>`;
     feed.innerHTML = `
       <div class="q">${esc(session.question)}</div>
       ${session.answer ? `<p class="answer">${esc(session.answer)}</p>` : ''}
@@ -147,10 +208,25 @@
           <span class="dot"><span>${i + 1}</span></span>
           <div class="txt">${esc(s.instruction)}${s.value ? `<br><span class="val">${esc(s.value)}</span>` : ''}</div>
         </li>`).join('')}</ol>` : ''}
-      <div class="meta">${fast ? '<span class="tag fast">Готовый гайд · мгновенно · 0 токенов</span>' : `<span class="tag">Claude${session.source === 'map' ? ' · по карте продукта' : ''}${session.ms ? ' · ' + (session.ms / 1000).toFixed(1).replace('.', ',') + ' с' : ''}</span>`}</div>
+      <div class="meta">${tag}${session.replanning ? '<span class="tag">уточняю шаги для этой страницы…</span>' : ''}</div>
       ${steps.length && !done ? `<div class="actions row"><button class="btn ghost" data-act="stop">Остановить</button>${idx > 0 ? '<button class="btn ghost" data-act="restart">С начала</button>' : ''}</div>` : ''}
+      ${!steps.length ? '<div class="actions row"><button class="btn ghost" data-act="new">Новый вопрос</button></div>' : ''}
       ${done ? doneCard(fast) : ''}`;
-    if (saving) { const f = $('#save-name'); if (f) f.focus(); }
+    if (saving) { const f = $('#save-name'); if (f) { f.focus(); f.setSelectionRange(f.value.length, f.value.length); } }
+  }
+
+  // The thinking line: reading, then planning, then the streamed answer as it is written. Always cancellable.
+  function updateThinking() {
+    const box = $('#think');
+    if (!box || !session || session.status !== 'thinking') return;
+    const t = Date.now() - (session.startedAt || Date.now());
+    let line;
+    if (progress && progress.chars) line = `Пишу шаги${progress.steps ? ' · ' + progress.steps : '…'}`;
+    else line = t > 1400 ? 'Продумываю шаги' : 'Читаю страницу';
+    const slow = t > 100e3;
+    box.innerHTML = `<div class="thinking"><span class="spin"></span><span>${esc(slow ? 'Ответ задерживается' : line)}</span></div>
+      ${progress && progress.answer ? `<p class="answer">${esc(progress.answer)}</p>` : ''}
+      <div class="actions row"><button class="btn ghost" data-act="stop">Отменить</button>${slow ? '<button class="btn ghost" data-act="retry">Спросить ещё раз</button>' : ''}</div>`;
   }
 
   function hello() {
@@ -168,41 +244,61 @@
   function doneCard(fast) {
     if (fast) return `<div class="done-card"><b>Готово</b><p>Сценарий пройден до конца.</p><div class="row"><button class="btn ghost" data-act="restart">Пройти ещё раз</button><button class="btn ghost" data-act="new">Новый вопрос</button></div></div>`;
     if (saving) return `<div class="done-card"><b>Сохранить как сценарий</b><p>В следующий раз он запустится мгновенно и бесплатно.</p>
-      <input class="field" id="save-name" value="${esc(session.question)}" aria-label="Название сценария">
+      <input class="field" id="save-name" value="${esc(saveName || session.question)}" aria-label="Название сценария">
       <div class="row"><button class="btn main" data-act="save">Сохранить</button><button class="btn ghost" data-act="cancel-save">Отмена</button></div></div>`;
     return `<div class="done-card"><b>Готово</b><p>Сохраните эти шаги как сценарий, чтобы коллеги проходили их без ожидания.</p><div class="row"><button class="btn soft" data-act="ask-save">Сохранить как сценарий</button><button class="btn ghost" data-act="new">Новый вопрос</button></div></div>`;
   }
 
+  $('#feed').addEventListener('input', e => { if (e.target.id === 'save-name') saveName = e.target.value; });
   $('#feed').addEventListener('click', async e => {
     const a = e.target.closest('[data-act],[data-go],[data-run],[data-ask]');
-    if (!a) return;
+    if (!a || !tab) return;
     if (a.dataset.ask) return askQuestion(a.dataset.ask);
     if (a.dataset.run) return runPlaybook(a.dataset.run);
     if (a.dataset.go != null && session && session.steps && session.steps.length) {
-      session = (await bg({ type: 'go', tabId: tab.id, index: +a.dataset.go })).session || session; return render();
+      const r = await bg({ type: 'go', tabId: tab.id, index: +a.dataset.go });
+      if (r.error) flash(r.error);
+      session = r.session || session; return render();
     }
     switch (a.dataset.act) {
       case 'open-settings': return setView('set');
-      case 'stop': case 'new': session = (await bg({ type: 'stop', tabId: tab.id })).session; saving = false; render(); q.focus(); return;
-      case 'restart': session = (await bg({ type: 'go', tabId: tab.id, index: 0 })).session || session; return render();
-      case 'ask-save': saving = true; return render();
+      case 'retry': if (session && session.question) return askQuestion(session.question); return;
+      case 'ask-anyway': if (session && session.question) return askQuestion(session.question, true); return;
+      case 'refresh': {
+        const question = session && session.question;
+        await bg({ type: 'cache:drop', tabId: tab.id });
+        if (question) return askQuestion(question, true);
+        return;
+      }
+      case 'stop': case 'new': {
+        const r = await bg({ type: 'stop', tabId: tab.id });
+        session = r.error ? null : r.session || null; saving = false; progress = null; render(); q.focus();
+        return;
+      }
+      case 'restart': { const r = await bg({ type: 'go', tabId: tab.id, index: 0 }); if (r.error) flash(r.error); session = r.session || session; return render(); }
+      case 'ask-save': saving = true; saveName = session.question || ''; return render();
       case 'cancel-save': saving = false; return render();
       case 'save': {
-        const name = ($('#save-name').value || session.question).trim();
-        await bg({ type: 'playbook:save', origin: tab.origin, name, steps: session.steps });
+        const name = (($('#save-name') && $('#save-name').value) || session.question || 'Мой сценарий').trim();
+        const r = await bg({ type: 'playbook:save', origin: tab.origin, name, steps: session.steps });
+        if (r.error) { flash(r.error); return; }
         saving = false; await loadPlaybooks();
-        session = (await bg({ type: 'stop', tabId: tab.id })).session; render();
+        session = (await bg({ type: 'stop', tabId: tab.id })).session || null; render();
         flash(`Сценарий «${name}» сохранён`);
       }
     }
   });
-  $('#feed').addEventListener('keydown', e => { if (e.target.id === 'save-name' && e.key === 'Enter') { e.preventDefault(); $('[data-act="save"]').click(); } });
+  $('#feed').addEventListener('keydown', e => { if (e.target.id === 'save-name' && e.key === 'Enter') { e.preventDefault(); const b = $('[data-act="save"]'); if (b) b.click(); } });
 
   async function runPlaybook(id) {
+    if (!tab) return;
+    const tabId = tab.id;
     setView('ask');
-    const res = await bg({ type: 'playbook:run', tabId: tab.id, origin: tab.origin, id });
-    if (res.error) flash(res.error);
-    session = res.session || session; render();
+    const res = await bg({ type: 'playbook:run', tabId, origin: tab.origin, id });
+    if (!tab || tab.id !== tabId || res.stale) return;
+    if (res.error) { flash(res.error); session = { question: '', status: 'error', error: res.error, steps: [], tabId }; }
+    else session = res.session || session;
+    render();
   }
 
   // ---------- playbooks view ----------
@@ -216,26 +312,29 @@
     box.hidden = !recording;
     if (recording) {
       const steps = session.recorded || [];
+      const name = $('#rec-name') ? $('#rec-name').value : '';
       box.innerHTML = `<div class="rec"><div class="live"><i></i>Запись идёт</div>
         <div class="muted">Пройдите действие на странице как обычно. Каждый клик и заполненное поле станут шагом. Текст, который вы вводите, не записывается.</div>
-        ${steps.length ? `<ol>${steps.map((s, i) => `<li><input data-edit="${i}" value="${esc(s.instruction)}" aria-label="Шаг ${i + 1}"></li>`).join('')}</ol>` : '<p class="faint small">Пока ни одного шага.</p>'}
-        <input class="field" id="rec-name" placeholder="Название, например «Выставить счёт»" aria-label="Название сценария">
+        ${steps.length ? `<ol>${steps.map((s, i) => `<li><input data-edit="${i}" value="${esc(recEdits[i] != null ? recEdits[i] : s.instruction)}" aria-label="Шаг ${i + 1}"></li>`).join('')}</ol>` : '<p class="faint small">Пока ни одного шага.</p>'}
+        <input class="field" id="rec-name" placeholder="Название, например «Выставить счёт»" aria-label="Название сценария" value="${esc(name)}">
         <div class="row"><button class="btn main" data-act="rec-save" ${steps.length ? '' : 'disabled'}>Остановить и сохранить</button><button class="btn ghost" data-act="rec-cancel">Отменить</button></div></div>`;
     }
     $('#pb-list').innerHTML = playbooks.length ? playbooks.map(p => `
       <div class="pb"><b>${esc(p.name)}${p.learned ? '<span class="tagl">гайд</span>' : ''}</b>
-        <small>${ruCount(p.steps.length, 'шаг', 'шага', 'шагов')}${p.runs ? ' · запускали ' + ruCount(p.runs, 'раз', 'раза', 'раз') : ''}${p.healed ? ' · сам обновился ' + ruCount(p.healed, 'раз', 'раза', 'раз') : ''}</small>
+        <small>${ruCount((p.steps || []).length, 'шаг', 'шага', 'шагов')}${p.runs ? ' · запускали ' + ruCount(p.runs, 'раз', 'раза', 'раз') : ''}${p.healed ? ' · сам обновился ' + ruCount(p.healed, 'раз', 'раза', 'раз') : ''}</small>
         <div class="row"><button class="icon play" data-run="${esc(p.id)}" title="Запустить" aria-label="Запустить">▶</button><button class="icon" data-del="${esc(p.id)}" title="Удалить" aria-label="Удалить">✕</button></div>
       </div>`).join('') : (recording ? '' : '<div class="empty">Здесь появятся сценарии: сохраните ответ Scopos или запишите свой.</div>');
   }
   $('#rec-start').addEventListener('click', async () => {
     if (!tab) return;
-    const res = await bg({ type: 'record:start', tabId: tab.id }).catch(() => null);
-    session = res && res.session; renderPlaybooks();
+    const res = await bg({ type: 'record:start', tabId: tab.id });
+    if (res.error) { flash(res.error); return; }
+    recEdits = {};
+    session = res.session || null; renderPlaybooks();
   });
-  let recEdits = {};
   $('#view-pb').addEventListener('input', e => { if (e.target.dataset.edit != null) recEdits[e.target.dataset.edit] = e.target.value; });
   $('#view-pb').addEventListener('click', async e => {
+    if (!tab) return;
     const run = e.target.closest('[data-run]'); if (run) return runPlaybook(run.dataset.run);
     const del = e.target.closest('[data-del]');
     if (del) {
@@ -254,18 +353,23 @@
     try { navigator.clipboard.writeText(data).then(() => flash('JSON сценариев скопирован'), () => flash('Браузер не дал скопировать')); } catch (e) { flash('Браузер не дал скопировать'); }
   });
   async function stopRecording(save = true) {
+    if (!tab) return;
     const name = ($('#rec-name') && $('#rec-name').value.trim()) || 'Мой сценарий';
     const res = await bg({ type: 'record:stop', tabId: tab.id });
     const steps = (res.steps || []).map((s, i) => (recEdits[i] ? { ...s, instruction: recEdits[i] } : s));
     recEdits = {};
     session = null;
-    if (save && steps.length) { await bg({ type: 'playbook:save', origin: tab.origin, name, steps }); flash(`Сценарий «${name}» сохранён`); }
+    if (save && steps.length) {
+      const r = await bg({ type: 'playbook:save', origin: tab.origin, name, steps });
+      flash(r.error ? r.error : `Сценарий «${name}» сохранён`);
+    }
     await loadPlaybooks(); renderPlaybooks();
   }
 
   // ---------- settings ----------
   async function renderKey() {
-    const { apiKey } = await chrome.storage.local.get('apiKey');
+    let apiKey = '';
+    try { apiKey = (await chrome.storage.local.get('apiKey')).apiKey || ''; } catch (e) { apiKey = ''; }
     $('#key').value = '';
     $('#key').placeholder = apiKey ? '••••••••' + apiKey.slice(-4) : 'sk-ant-…';
     $('#key-state').innerHTML = apiKey ? '<span class="pill ok">Подключено</span><button class="btn ghost" id="key-del">Удалить ключ</button>' : '<span class="pill need">Нужен ключ</span>';
@@ -273,18 +377,34 @@
   $('#key-save').addEventListener('click', async () => {
     const v = $('#key').value.trim();
     if (!/^sk-ant-/.test(v)) { flash('Ключ начинается с sk-ant-'); return; }
-    await chrome.storage.local.set({ apiKey: v });
-    renderKey(); flash('Ключ сохранён');
+    try { await chrome.storage.local.set({ apiKey: v }); flash('Ключ сохранён'); } catch (e) { flash('Не получилось сохранить ключ'); }
+    renderKey();
   });
   $('#key').addEventListener('keydown', e => { if (e.key === 'Enter') $('#key-save').click(); });
-  $('#key-state').addEventListener('click', async e => { if (e.target.id === 'key-del') { await chrome.storage.local.remove('apiKey'); renderKey(); } });
+  $('#key-state').addEventListener('click', async e => { if (e.target.id === 'key-del') { await chrome.storage.local.remove('apiKey').catch(() => {}); renderKey(); } });
+
+  const money = c => '$' + (c > 0 && c < 0.01 ? c.toFixed(4) : c.toFixed(2)).replace('.', ',');
+  const usageLine = u => `≈ ${Math.round(u.tokens || 0).toLocaleString('ru-RU')} токенов, ~${money(u.cost || 0)} · ${ruCount(u.calls || 0, 'запрос', 'запроса', 'запросов')}`;
+  async function renderUsage() {
+    const box = $('#usage');
+    if (!box) return;
+    const r = await bg({ type: 'usage', origin: tab ? tab.origin : '' });
+    const site = r.site, total = r.total || { tokens: 0, cost: 0, calls: 0 };
+    box.innerHTML = `${tab && tab.host ? `<p class="muted"><b>${esc(tab.host)}</b>: ${site ? usageLine(site) : 'пока ни одного запроса к Claude'}${site && site.cacheHits ? ` · ${ruCount(site.cacheHits, 'ответ', 'ответа', 'ответов')} из кэша бесплатно` : ''}</p>` : ''}
+      <p class="muted">Всего: ${usageLine(total)}</p>
+      <p class="faint small">Оценка по ценам Anthropic, точная сумма в console.anthropic.com. Готовые сценарии и ответы из кэша токенов не тратят.</p>
+      ${total.calls ? '<button class="btn ghost" id="usage-reset">Сбросить счётчик</button>' : ''}`;
+  }
+  $('#view-set').addEventListener('click', async e => {
+    if (e.target.id === 'usage-reset') { await bg({ type: 'usage:reset' }); renderUsage(); }
+  });
 
   // ---------- toast ----------
   function flash(text) {
     let t = $('.toast');
-    if (!t) { t = document.createElement('div'); t.className = 'toast'; document.body.appendChild(t); }
+    if (!t) { t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); document.body.appendChild(t); }
     t.textContent = text; t.classList.add('on');
-    clearTimeout(flash.t); flash.t = setTimeout(() => t.classList.remove('on'), 1800);
+    clearTimeout(flash.t); flash.t = setTimeout(() => t.classList.remove('on'), 2400);
   }
 
   setView('ask');

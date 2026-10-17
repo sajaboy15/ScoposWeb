@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scopos · стресс-стенд</title>
+<style>
+/* A page made of the cases where in-page guides usually lose their target or draw the marker in the wrong place. */
+:root { --bg: #fff; --bg2: #f4f5f7; --line: #dfe2e7; --text: #1d2330; --muted: #5b6474; color-scheme: light; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+header.sticky { position: sticky; top: 0; z-index: 10; background: #1d2330; color: #fff; padding: 12px 20px; display: flex; gap: 12px; align-items: center; }
+header.sticky button { background: #fff; border: 0; border-radius: 6px; padding: 6px 10px; }
+main { padding: 20px; display: grid; gap: 24px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+section { border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; }
+h2 { font-size: 14px; margin: 0 0 10px; color: var(--muted); font-weight: 600; }
+button, input, select { font: inherit; }
+.scroller { height: 160px; overflow: auto; border: 1px dashed var(--line); padding: 8px; }
+.scroller .inner { height: 600px; position: relative; }
+.scroller .deep { position: absolute; top: 420px; left: 10px; }
+.nested { height: 120px; overflow: auto; border: 1px dotted #aaa; margin-top: 300px; }
+.nested .inner2 { height: 400px; padding-top: 250px; }
+.scaled { transform: scale(.8) translateX(20px); transform-origin: 0 0; border: 1px solid var(--line); padding: 10px; }
+.clip { height: 40px; overflow: hidden; border: 1px solid var(--line); }
+.clip button { margin-top: 30px; }
+.cover { position: relative; height: 60px; }
+.cover .over { position: absolute; inset: 0; background: rgba(255,255,255,.92); display: grid; place-items: center; color: var(--muted); }
+.fixedbtn { position: fixed; right: 20px; bottom: 90px; z-index: 5; }
+.row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.tall { height: 900px; background: linear-gradient(var(--bg), var(--bg2)); border-radius: 12px; display: grid; align-items: end; padding: 14px; }
+iframe { width: 100%; height: 140px; border: 1px solid var(--line); border-radius: 8px; }
+.rtl { direction: rtl; }
+</style>
+</head>
+<body>
+<header class="sticky"><b>Stress</b><button id="hdr-help">Помощь</button><span style="margin-left:auto">шапка прилипает и закрывает верх страницы</span></header>
+<main>
+  <section><h2>1. Прокрутка внутри блока</h2>
+    <div class="scroller" id="sc1"><div class="inner"><p>Кнопка ниже видна только после прокрутки этого блока.</p><button class="deep" id="deep-btn">Глубокая кнопка</button></div></div>
+  </section>
+  <section><h2>2. Вложенная прокрутка</h2>
+    <div class="scroller"><div class="inner" style="height:700px"><div class="nested"><div class="inner2"><button id="nested-btn">Кнопка во вложенном блоке</button></div></div></div></div>
+  </section>
+  <section><h2>3. Масштаб у родителя</h2>
+    <div class="scaled"><button id="scaled-btn">Кнопка внутри scale(.8)</button> <input placeholder="Поле внутри масштаба" id="scaled-input"></div>
+  </section>
+  <section><h2>4. Одинаковые подписи</h2>
+    <div><b>Клиенты</b> <button>Сохранить</button></div>
+    <div style="margin-top:8px"><b>Счета</b> <button>Сохранить</button></div>
+    <div style="margin-top:8px"><b>Тарифы</b> <button aria-label="Сохранить тариф">Сохранить</button></div>
+  </section>
+  <section><h2>5. Перерисовка (элемент заменяется каждые 1,5 с)</h2>
+    <div id="rerender"></div>
+  </section>
+  <section><h2>6. Обрезан overflow:hidden</h2>
+    <div class="clip"><button id="clipped-btn">Обрезанная кнопка</button></div>
+  </section>
+  <section><h2>7. Перекрыт другим слоем</h2>
+    <div class="cover"><button id="covered-btn">Перекрытая кнопка</button><div class="over">поверх кнопки лежит слой</div></div>
+  </section>
+  <section><h2>8. Shadow DOM</h2>
+    <shadow-card id="shadow-host"></shadow-card>
+  </section>
+  <section><h2>9. iframe того же сайта</h2>
+    <iframe id="frame" srcdoc="<body style='font:14px system-ui;margin:10px'><p>Форма во фрейме</p><input placeholder='Почта во фрейме' name='frame-email'> <button id='frame-btn'>Кнопка во фрейме</button></body>"></iframe>
+  </section>
+  <section><h2>10. Список строк с одинаковыми кнопками</h2>
+    <div class="row"><span>INV-1042 · Северный ветер</span><button>Открыть</button></div>
+    <div class="row"><span>INV-1043 · Bright Cargo</span><button>Открыть</button></div>
+    <div class="row"><span>INV-1044 · ИП Каримова</span><button>Открыть</button></div>
+  </section>
+  <section><h2>11. Меню, которое открывается по клику</h2>
+    <button id="menu-btn" aria-expanded="false" aria-haspopup="menu">Действия ▾</button>
+    <div role="menu" id="menu" hidden style="border:1px solid var(--line);border-radius:8px;padding:6px;margin-top:6px;width:200px">
+      <div role="menuitem" tabindex="0">Дублировать</div><div role="menuitem" tabindex="0">Отметить оплаченным</div><div role="menuitem" tabindex="0">Удалить</div>
+    </div>
+  </section>
+  <section class="rtl"><h2>12. RTL</h2><button id="rtl-btn">زر الحفظ</button></section>
+  <section><h2>13. Иконка без текста</h2>
+    <button id="icon-btn" aria-label="Настройки"><svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor"/></svg></button>
+    <button id="icon-del" title="Delete"><svg width="16" height="16"><path d="M3 3l10 10M13 3L3 13" stroke="currentColor"/></svg></button>
+  </section>
+  <section><h2>14. Очень низко на странице</h2><div class="tall"><button id="bottom-btn">Кнопка внизу</button></div></section>
+</main>
+<button class="fixedbtn" id="fixed-btn">Фиксированная кнопка</button>
+<script>
+customElements.define('shadow-card', class extends HTMLElement {
+  constructor() { super(); const r = this.attachShadow({ mode: 'open' }); r.innerHTML = '<style>button{padding:6px 10px}</style><p>Внутри открытого shadow root</p><button id="shadow-btn">Кнопка в shadow DOM</button>'; }
+});
+// React-like re-render: the same control, a new node every 1.5s, with a generated id
+let n = 0;
+const draw = () => { document.getElementById('rerender').innerHTML = `<button id="btn-${1000 + (n++)}" data-testid="rerender-btn">Пересоздаваемая кнопка</button>`; };
+draw(); setInterval(draw, 1500);
+document.getElementById('menu-btn').onclick = e => { const m = document.getElementById('menu'); m.hidden = !m.hidden; e.currentTarget.setAttribute('aria-expanded', String(!m.hidden)); };
+</script>
+<script src="/scopos.js" data-endpoint="/api/scopos" data-product="Stress"></script>
+</body>
+</html>
