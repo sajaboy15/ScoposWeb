@@ -208,6 +208,8 @@ function cleanMap(m) {
       opener: typeof v.opener === 'string' ? v.opener.slice(0, 16) : undefined,
       title: str(v.title, 120),
       headings: Array.isArray(v.headings) ? v.headings.filter(h => typeof h === 'string').slice(0, 8).map(h => h.slice(0, 80)) : [],
+      // Short static text of the screen; Brain.mapText checks it for personal data again when it renders it.
+      facts: Array.isArray(v.facts) ? v.facts.filter(f => typeof f === 'string').slice(0, 12).map(f => f.slice(0, 80)) : undefined,
       controls: v.controls.filter(c => c && typeof c.ref === 'string').map(c => ({
         ref: c.ref.slice(0, 16), role: str(c.role, 30), name: str(c.name, 120),
         section: str(c.section, 80) || undefined, state: str(c.state, 80) || undefined,

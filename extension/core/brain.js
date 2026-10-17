@@ -156,8 +156,10 @@ ${UNTRUSTED}`;
 
 the product map lists every screen (page), dialog and panel, as
 VIEW <id> <kind> "<title>" <address>
+  facts: <short text the screen shows> | …
   <ref> <role> "<name>" · <section> · <state> · options: a | b → <id of the view it opens>
 controls under GLOBAL are on every page (navigation). a control with → opens that view.
+facts are what the screen showed while it was studied (labels with values, such as the current plan or a date). answer questions about what the product shows from them and name the screen; when no fact says it, say which screen to look at instead of guessing.
 to reach a view, follow the → links from where the user is. dialogs and panels open from their opener control.
 
 STEPS
@@ -182,9 +184,35 @@ ${UNTRUSTED}`;
     return { sig, global };
   }
 
+  // Facts are page text: checked again here whatever stored the map. Same rules as factOk in explore.js.
+  const FACT_N = 12, FACT_LEN = 80;
+  const FACT_EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?<![\p{L}\p{N}])@[\w.]{2,}/u;
+  const FACT_URL = /\b(?:https?:\/\/|www\.)\S|\b[\w-]{2,}\.(?:com|ru|uz|kz|io|net|org|app|dev|co|me|info|biz)\b/i;
+  const FACT_TOKEN = /(?=[\w-]*\d)(?=[\w-]*[A-Za-z])[A-Za-z0-9_-]{16,}/;
+  const FACT_DATE = /(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})(?!\d)/g;
+  const FACT_RUN = /\+?\d(?:[\s().,\-–/]*\d)*/g;
+  const FACT_MONEY = /^\d{1,3}(?:[\s.,]\d{3})+(?:[.,]\d{1,2})?$/;
+  function factOk(s) {
+    if (!s || !/\p{L}/u.test(s) || FACT_EMAIL.test(s) || FACT_URL.test(s) || FACT_TOKEN.test(s)) return false;
+    for (const run of s.replace(FACT_DATE, ' ').match(FACT_RUN) || []) {
+      const digits = run.replace(/\D/g, '').length;
+      if ((/^\+\d/.test(run) && digits >= 5) || (digits >= 7 && !(digits <= 9 && FACT_MONEY.test(run)))) return false;
+    }
+    return true;
+  }
+  // One line each; no "|" (the separator) and no angle brackets, so a fact can't close the <product_map> block.
+  const factsOf = v => (Array.isArray(v.facts) ? v.facts : []).filter(f => typeof f === 'string')
+    .map(f => f.replace(/[<>|]/g, ' ').replace(/[    ]/g, ' ').replace(/\s+/g, ' ').trim()).filter(factOk)
+    .slice(0, FACT_N).map(f => capText(f, FACT_LEN));
+
   function viewText(v, isGlobal) {
     const where = v.kind === 'page' ? v.key : `opens from ${v.opener} on ${v.parent}`;
-    return [`VIEW ${v.id} ${v.kind} "${capText(v.title, 80)}" ${capText(where, 120)}`, ...v.controls.filter(c => v.kind !== 'page' || !isGlobal(c)).slice(0, 120).map(lineOf)].join('\n');
+    const facts = factsOf(v);
+    return [
+      `VIEW ${v.id} ${v.kind} "${capText(v.title, 80)}" ${capText(where, 120)}`,
+      ...(facts.length ? [`  facts: ${facts.join(' | ')}`] : []),
+      ...v.controls.filter(c => v.kind !== 'page' || !isGlobal(c)).slice(0, 120).map(lineOf),
+    ].join('\n');
   }
 
   /**
@@ -425,7 +453,7 @@ ${UNTRUSTED}`;
     throw lastError || new Error('Claude не ответил.');
   }
 
-  const Brain = { MODELS, buildAsk, buildLocate, buildLearn, buildAskMap, mapText, refSteps, safeValue, viewOf, pageKey, call, parse, headers, tokens, norm, API_URL };
+  const Brain = { MODELS, buildAsk, buildLocate, buildLearn, buildAskMap, mapText, factOk, refSteps, safeValue, viewOf, pageKey, call, parse, headers, tokens, norm, API_URL, MAP_BUDGET };
   if (typeof module === 'object' && module.exports) module.exports = Brain;
   root.ScoposBrain = Brain;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

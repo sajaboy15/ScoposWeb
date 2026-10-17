@@ -791,12 +791,151 @@
     return list.filter((x, i) => keep.has(i));
   }
 
+  // ---------------- facts: what a screen shows, not only what it does ----------------
+  // Short static text of the screen, so «когда следующее списание?» is answered from the map:
+  // «Текущий тариф: Команда», «Следующее списание 1 ноября». Never a field's value (fields are not read, and text
+  // that repeats what is typed in one is dropped), never text inside a control, a table or a list (records, not
+  // the screen), a toast, navigation or a region the site masks for session recorders. E-mails, phones, long
+  // numbers, tokens and addresses are dropped, not masked. brain.js checks the same rules again when it renders them.
+  const FACTS = { n: 12, len: 80, prose: 120, nodes: 1500 };
+  const FACT_SKIP = [
+    'script', 'style', 'template', 'noscript', 'svg', 'canvas', 'iframe', 'frame', 'object', 'embed', 'video', 'audio',
+    'input', 'textarea', 'select', 'option', 'button', 'a', 'label', 'form', 'fieldset', 'h1', 'h2', 'h3', 'pre', 'code',
+    'table', 'ul', 'ol', 'nav', 'aside', 'footer',
+    '[hidden]', '[aria-hidden=true]', '[inert]', '[contenteditable]', '[role=status]', '[role=alert]', '[role=log]', '[role=marquee]',
+    '[role=timer]', '[aria-live]', '[role=button]', '[role=link]', '[role=tab]', '[role=tablist]', '[role=menu]', '[role=menubar]',
+    '[role=menuitem]', '[role=listbox]', '[role=option]', '[role=textbox]', '[role=searchbox]', '[role=combobox]', '[role=switch]',
+    '[role=checkbox]', '[role=radio]', '[role=slider]', '[role=spinbutton]', '[role=grid]', '[role=treegrid]', '[role=table]',
+    '[role=row]', '[role=list]', '[role=tree]', '[role=feed]', '[role=navigation]', '[role=banner]', '[role=contentinfo]',
+    '[role=complementary]', '[role=tooltip]',
+    // masks for session recorders (Hotjar, FullStory, PostHog, rrweb, Sentry …) and our own opt-out
+    '[data-private]', '[data-sensitive]', '[data-hj-suppress]', '[data-sentry-mask]', '[data-scopos-private]', '.fs-mask',
+    '.fs-exclude', '.ph-no-capture', '.rr-mask', '.rr-block', '.sentry-mask', '.private', '.sensitive',
+  ].join(',');
+  // Inline text formatting: a parent with its own text and only these children reads as one piece.
+  const PHRASING = new Set(['B', 'STRONG', 'EM', 'I', 'U', 'S', 'SPAN', 'SMALL', 'MARK', 'ABBR', 'TIME', 'DATA', 'SUB', 'SUP', 'BR', 'WBR', 'Q', 'CITE', 'DFN', 'BDI', 'BDO', 'INS', 'DEL', 'OUTPUT', 'METER', 'VAR', 'KBD', 'SAMP']);
+  // What a value looks like when it follows its label: «Текущий тариф» <b>Команда</b>.
+  const VALUE_TAG = new Set(['B', 'STRONG', 'DD', 'OUTPUT', 'DATA', 'TIME', 'METER', 'MARK']);
+  const VALUE_CLASS = /value|amount|price|total|stat|metric|count|number|figure|balance|plan|tier|date/i;
+  const factClean = s => String(s == null ? '' : s).replace(/[-​-‍⁠﻿­]/g, '').replace(/[    ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const factKey = s => low(s).replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+  // Personal data that is dropped (not masked) from facts.
+  const FACT_EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+|(?<![\p{L}\p{N}])@[\w.]{2,}/u;
+  const FACT_URL = /\b(?:https?:\/\/|www\.)\S|\b[\w-]{2,}\.(?:com|ru|uz|kz|io|net|org|app|dev|co|me|info|biz)\b/i;
+  const FACT_TOKEN = /(?=[\w-]*\d)(?=[\w-]*[A-Za-z])[A-Za-z0-9_-]{16,}/; // keys, tokens, record ids
+  const FACT_DATE = /(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})(?!\d)/g; // 01.11.2026, 2026-11-01
+  const FACT_RUN = /\+?\d(?:[\s().,\-–/]*\d)*/g; // a number with its separators: +7 (999) 123-45-67, 4242 4242 …
+  const FACT_MONEY = /^\d{1,3}(?:[\s.,]\d{3})+(?:[.,]\d{1,2})?$/; // 1 234 567 ₽, 12,900.50
+  /** May this piece of page text go into the map? Pure: no DOM needed. */
+  function factOk(s) {
+    s = factClean(s);
+    if (!s || !/\p{L}/u.test(s)) return false;
+    if (FACT_EMAIL.test(s) || FACT_URL.test(s) || FACT_TOKEN.test(s)) return false;
+    for (const run of s.replace(FACT_DATE, ' ').match(FACT_RUN) || []) {
+      const digits = run.replace(/\D/g, '').length;
+      if (/^\+\d/.test(run) && digits >= 5) return false; // +7 999 …, +998 90 …
+      if (digits >= 7 && !(digits <= 9 && FACT_MONEY.test(run))) return false; // phones, cards, accounts, INN
+    }
+    return true;
+  }
+
+  // What the user typed into the fields of this document: never read into the map, only used to drop text that repeats it.
+  function typedValues() {
+    const out = [];
+    try {
+      for (const f of document.querySelectorAll('input,textarea,[contenteditable]')) {
+        if (ours(f) || out.length >= 200) continue;
+        if (f.tagName === 'INPUT' && /^(button|submit|reset|image|checkbox|radio|range|color|file)$/i.test(f.type)) continue;
+        const v = factKey(String(f.tagName === 'INPUT' || f.tagName === 'TEXTAREA' ? f.value : f.textContent || '').slice(0, 200));
+        if (v.length >= 3) out.push(v);
+      }
+    } catch (e) { /* ignore */ }
+    return out;
+  }
+
+  // The main content when there is one: the sidebar and the top bar are navigation, already in the controls.
+  const factRoot = () => [...document.querySelectorAll('main,[role=main]')].find(m => !ours(m) && shown(m)) || document.body;
+  // A <header> inside the content is a section header («3 участника»); a page-level one is the top bar.
+  const IN_CONTENT = 'main,[role=main],article,section,dialog,[role=dialog],[role=alertdialog],[role=tabpanel],[role=region]';
+
+  /** Text pieces of a container in document order: { el, text }. */
+  function factPieces(root) {
+    const out = [];
+    let seen = 0;
+    const skip = el => el.matches(FACT_SKIP) || ours(el) || (el.tagName === 'HEADER' && !(el.parentElement && el.parentElement.closest(IN_CONTENT)));
+    const ownText = el => { let t = ''; for (const n of el.childNodes) if (n.nodeType === 3) t += n.nodeValue; return factClean(t); };
+    (function walk(el, top) {
+      if (out.length >= 80 || ++seen > FACTS.nodes) return;
+      if (!top && skip(el)) return;
+      if (!shown(el)) return;
+      const own = ownText(el), kids = [...el.children];
+      if (own && kids.every(k => PHRASING.has(k.tagName) && !skip(k) && (k.tagName === 'BR' || k.tagName === 'WBR' || shown(k)))) {
+        out.push({ el, text: factClean(el.textContent) }); // «Следующее списание <b>1 ноября</b>» is one piece
+        return;
+      }
+      if (own) out.push({ el, text: own });
+      for (const k of kids) walk(k, false);
+    })(root, true);
+    return out;
+  }
+
+  const LABEL_CLASS = /label|title|caption|name|key|term|hint/i; // "stat-label" is the label of a stat
+  const isValue = el => VALUE_TAG.has(el.tagName) || (VALUE_CLASS.test(classOf(el)) && !LABEL_CLASS.test(classOf(el)));
+  /**
+   * Facts of one view: label/value pairs first, then short lone text, ≤ 12 × 80 characters.
+   * known: text already in the map for this view (title, headings, the parent page's facts) is not repeated.
+   */
+  function factsOf(root, known = []) {
+    if (!root) return [];
+    let pieces;
+    try { pieces = factPieces(root); } catch (e) { return []; }
+    const typed = typedValues();
+    const seen = new Set(known.map(factKey).filter(Boolean));
+    const found = [];
+    const add = (text, pair, at) => {
+      text = factClean(text);
+      const k = factKey(text);
+      if (!k || seen.has(k) || text.length > FACTS.prose || !factOk(text)) return;
+      if (typed.some(t => k.includes(t))) return; // repeats what is typed in a field
+      seen.add(k);
+      found.push({ text: text.length > FACTS.len ? text.slice(0, FACTS.len - 1) + '…' : text, pair, at });
+    };
+    for (let i = 0; i < pieces.length; i++) {
+      const a = pieces[i], b = pieces[i + 1];
+      const near = b && (b.el.parentElement === a.el.parentElement || b.el.parentElement === a.el || (a.el.tagName === 'DT' && b.el.tagName === 'DD'));
+      const colon = /[:：]$/.test(a.text);
+      if (b && near && a.text.length <= 40 && b.text.length <= 60 && !/[.!?]$/.test(a.text) && (colon || (isValue(b.el) && !isValue(a.el)))) {
+        add(`${a.text.replace(/\s*[:：]$/, '')}: ${b.text}`, true, i);
+        i++;
+        continue;
+      }
+      if (!colon) add(a.text, false, i);
+    }
+    // Pairs and text with a number or a date say the most; the rest fills what is left, in page order.
+    const rank = f => (f.pair ? 0 : /\d/.test(f.text) ? 1 : 2);
+    return found.slice().sort((x, y) => rank(x) - rank(y) || x.at - y.at).slice(0, FACTS.n).sort((x, y) => x.at - y.at).map(f => f.text);
+  }
+
+  // The panel a tab or a disclosure showed: its aria-controls target, or the tab panel that changed.
+  function panelRoot(el, nodes) {
+    const id = (el.getAttribute('aria-controls') || '').split(/\s+/)[0];
+    const ctl = id ? document.getElementById(id) : null;
+    if (ctl && !ours(ctl) && shown(ctl)) return ctl;
+    for (const n of nodes) {
+      const p = n.isConnected && n.closest ? n.closest('[role=tabpanel],details') : null;
+      if (p && !ours(p) && shown(p)) return p;
+    }
+    return null;
+  }
+
   async function captureView(v, container) {
     const kinds = new Map();
     const list = pick(inventory(container), kinds);
     const h1 = document.querySelector('h1');
     v.title = mask(container ? dialogTitle(container) : (h1 && !ours(h1) && h1.textContent) || document.title).replace(/\s+/g, ' ').trim().slice(0, 80);
     v.headings = [...(container || document).querySelectorAll('h1,h2,h3')].filter(h => !ours(h)).slice(0, 8).map(h => mask(h.textContent).replace(/\s+/g, ' ').trim().slice(0, 60));
+    v.facts = factsOf(container || factRoot(), [v.title, ...v.headings]);
     v.controls = await controlsOf(v, list, !!container, kinds);
     v.captured = true;
   }
@@ -821,6 +960,7 @@
     const views = Object.values(st.views).filter(v => v.controls);
     const cuts = [
       v => v.controls.forEach(c => { delete c.options; }),
+      v => { if (v.facts) v.facts = v.facts.slice(0, 4); },
       v => { v.headings = (v.headings || []).slice(0, 2); },
       v => v.controls.forEach(c => { if (c.d && c.d.sel) c.d.sel = c.d.sel.slice(0, 1); }),
       v => { if (v.controls.length > 60) { const keep = v.controls.filter(c => c.to || c.probe === undefined || c.probe === 'pressed'); v.controls = keep.concat(v.controls.filter(c => !keep.includes(c)).slice(0, Math.max(0, 60 - keep.length))); } },
@@ -994,6 +1134,7 @@
       const mv = addView(key, v.url, 'panel', v.key);
       if (mv && !mv.captured) {
         mv.title = mask(c.name).slice(0, 80); mv.headings = []; mv.opener = c.ref;
+        mv.facts = factsOf(panelRoot(el, nodes), [mv.title, v.title, ...(v.headings || []), ...(v.facts || [])]);
         mv.controls = await controlsOf(mv, appeared.slice(0, LIMITS.controls), true, new Map());
         mv.captured = true;
       }
@@ -1058,7 +1199,7 @@
         const page = v.kind === 'page' ? v : all[v.parent] || v;
         return {
           id: v.id, key: v.key, url: v.url, kind: v.kind, parent: v.parent && all[v.parent] ? all[v.parent].id : undefined, opener: v.opener,
-          title: v.title, headings: v.headings,
+          title: v.title, headings: v.headings, facts: v.facts && v.facts.length ? v.facts : undefined,
           controls: (v.controls || []).map(c => ({
             ref: c.ref, role: c.role, name: c.name, section: c.section, state: c.state, options: c.options,
             // Which screen the control lives on, so a guide can say «Перейдите на страницу …».
@@ -1176,5 +1317,5 @@
 
   S.explore = { start, resume, stop, toMap, running, pageKey, pressable: el => !!pressKind(el), isDangerous: el => danger(el) };
   // Pure helpers for dev/explore-safety-test.mjs (no DOM needed except for the element-level ones).
-  S._exploreTest = { isDangerText, isDangerAddress, linkTextDanger, dnorm, fwAttr, fwCheck, pressKind, closerIn, dialogQuestion };
+  S._exploreTest = { isDangerText, isDangerAddress, linkTextDanger, dnorm, fwAttr, fwCheck, pressKind, closerIn, dialogQuestion, factOk, factsOf, toMap };
 })(typeof window !== 'undefined' ? window : globalThis);
