@@ -12,7 +12,7 @@
  *   map:<origin>, learn:<origin>                                         the explorer's product map and learn state
  *   passive:<origin>   = { newViews: [id], lastGuidesAt }                 views seen while browsing since the last guide writing
  *   usage              = { total, origins, months: { 'YYYY-MM': { tokens, cost, calls } } }
- *   settings: apiKey, devServer (default http://localhost:4173), monthlyLimit ($, default 2), autoGuides (default true)
+ *   settings: apiKey (+ apiKeySource 'server' when it came from the local server's /setup handoff), devServer (default http://localhost:4173), monthlyLimit ($, default 2), autoGuides (default true)
  */
 importScripts('core/brain.js');
 const Brain = self.ScoposBrain;
@@ -150,6 +150,41 @@ async function auth() {
   const endpoint = await proxyEndpoint();
   return endpoint ? { key: '', endpoint, mode: 'proxy' } : null;
 }
+
+// ---------- the one-time key handoff from the local server ----------
+// On /setup the user presses «Передать ключ расширению Scopos»: the server then gives its key, once and within 2
+// minutes, to a POST from Origin chrome-extension://<this id> (Chrome sets that Origin; no page or other extension
+// can). It becomes this extension's own key (apiKeySource 'server'), so Scopos keeps working without the server.
+// Asked on the hello cycle when the server says keyOffer (core/update.js) and when the panel opens.
+// The key is never logged and never leaves this function except into chrome.storage.local.
+const HANDOFF_KEY = /^sk-ant-[\w-]{8,500}$/;
+let handoffRunning = null;
+/** { got: true } once the key is stored; { skipped | offline | refused } otherwise. force: also over a key we have. */
+function keyHandoff({ force = false } = {}) {
+  if (!handoffRunning) handoffRunning = (async () => {
+    if (!force && (await getKey())) return { skipped: 'has-key' };
+    const server = await devServer();
+    let res;
+    try {
+      res = await fetch(server + '/api/ext/key-handoff', {
+        method: 'POST', cache: 'no-store', credentials: 'omit', signal: AbortSignal.timeout(3000),
+        headers: { 'content-type': 'application/json', 'x-scopos-ext': chrome.runtime.id }, body: '{}',
+      });
+    } catch (e) { return { offline: true }; }
+    if (!res.ok) return { refused: res.status };
+    let key = '';
+    try { key = String(((await res.json()) || {}).key || '').trim(); } catch (e) { key = ''; }
+    if (!HANDOFF_KEY.test(key)) return { refused: 'bad-key' };
+    await chrome.storage.local.set({ apiKey: key, apiKeySource: 'server', apiKeyAt: Date.now() });
+    proxyCache = null;
+    broadcast({ type: 'key', mode: 'own', source: 'server' });
+    return { got: true };
+  })().finally(() => { handoffRunning = null; });
+  return handoffRunning;
+}
+self.scoposKeyHandoff = keyHandoff;
+// The key sits in chrome.storage.local: content scripts (they run inside web pages' processes) need none of it.
+try { const p = chrome.storage.local.setAccessLevel && chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' }); if (p && p.catch) p.catch(() => {}); } catch (e) { /* older Chrome: default access */ }
 /** Every Claude call goes through here: the right credentials, and this month's spend recorded. */
 async function claude(body, a, origin, opts = {}) {
   const o = { ...opts, onUsage: (u, m) => { recordUsage(origin, u, m); if (opts.onUsage) opts.onUsage(u, m); } };
@@ -178,7 +213,7 @@ function proxyError(e) {
   if (status === 403) return coded('key', 'Локальный сервер Scopos не принял запрос от расширения. Добавьте свой ключ в настройках.');
   return said ? new Error(`Локальный сервер Scopos: ${said.replace(/\.?$/, '.')}`) : e;
 }
-const NO_AUTH = 'Добавьте ключ Anthropic API в настройках или запустите локальный сервер Scopos с ключом, и Scopos начнёт отвечать. Готовые гайды работают и без него.';
+const noAuth = async () => `Нет ключа. Откройте ${await devServer()}/setup и нажмите «Передать ключ расширению», или вставьте ключ здесь, в настройках. Готовые гайды работают и без него.`;
 
 // ---------- monthly budget: every Claude call counts, over the limit only guides and the cache answer ----------
 const DEFAULT_LIMIT = 2;
@@ -362,10 +397,28 @@ const cacheClear = origin => chrome.storage.local.remove(answersKey(origin)).cat
 const selfContained = (question, history) => !history.length || stems(question).length >= 3;
 
 // ---------- token usage: running totals per site, shown in Settings ----------
-const PRICE = { 'claude-opus-5-5': [4, 20], 'claude-sonnet-5-5': [2, 10], 'claude-haiku-5-5': [0.1, 0.5] }; // $ per 1M tokens, in / out
+// Questions about a site in the last hour: the map is cached for an hour only when they come often (in memory; a
+// worker restart just falls back to the 5-minute cache).
+const recentAsks = new Map();
+function askCacheTtl(origin) {
+  const now = Date.now();
+  const list = (recentAsks.get(origin) || []).filter(t => now - t < 3600000);
+  list.push(now);
+  recentAsks.set(origin, list);
+  return list.length >= 3 ? '1h' : '5m';
+}
+// A 5-minute cache write costs 1.25x input, a 1-hour one 2x; the usage block says which when it can.
+const cacheWriteTokens = u => {
+  const c = u && u.cache_creation;
+  if (c && typeof c === 'object') return (c.ephemeral_5m_input_tokens || 0) * 1.25 + (c.ephemeral_1h_input_tokens || 0) * 2;
+  return (u.cache_creation_input_tokens || 0) * 2;
+};
+// $ per 1M tokens: input, output, cache-read multiplier (platform.claude.com pricing, checked 2026-10-17;
+// a 1h cache write is 2x input for all of them).
+const PRICE = { 'claude-fable-5-1': [10, 50, 0.025], 'claude-opus-5-5': [4, 20, 0.05], 'claude-sonnet-5-5': [2, 10, 0.05], 'claude-haiku-5-5': [0.1, 0.5, 0.1] }; // $ per 1M tokens, in / out
 function costOf(u, model) {
-  const [pi, po] = PRICE[model] || PRICE['claude-opus-5-5'];
-  return ((u.input_tokens || 0) * pi + (u.cache_creation_input_tokens || 0) * pi * 2 + (u.cache_read_input_tokens || 0) * pi * 0.1 + (u.output_tokens || 0) * po) / 1e6;
+  const [pi, po, cr] = PRICE[model] || PRICE['claude-opus-5-5'];
+  return ((u.input_tokens || 0) * pi + cacheWriteTokens(u) * pi + (u.cache_read_input_tokens || 0) * pi * cr + (u.output_tokens || 0) * po) / 1e6;
 }
 function recordUsage(origin, u, model) {
   if (!u) return;
@@ -457,14 +510,14 @@ async function ask(tabId, question, { force = false } = {}) {
     // 3. Ask Claude, within this month's limit.
     if (await overBudget()) throw coded('budget', await budgetMessage());
     const a = await auth();
-    if (!a) throw coded('key', NO_AUTH);
+    if (!a) throw coded('key', await noAuth());
     const ctl = controller(tabId, runId);
     try {
       const opts = { signal: ctl.signal, onText: progressTo(tabId, runId) };
       let out, steps, via;
       if (map) {
         // A learned product map: plan across every screen at once, with exact controls.
-        out = await claude(Brain.buildAskMap({ question, map, current: view, history }), a, origin, opts);
+        out = await claude(Brain.buildAskMap({ question, map, current: view, history, cacheTtl: askCacheTtl(origin) }), a, origin, opts);
         steps = Brain.refSteps(out.steps || [], map, question);
         via = 'map';
       } else {
@@ -1268,7 +1321,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // ---------- messages ----------
-const PANEL_TYPES = new Set(['ask', 'session', 'stop', 'go', 'playbooks', 'playbook:save', 'playbook:delete', 'playbook:run', 'record:start', 'record:stop', 'learn:start', 'learn:stop', 'learn:finish', 'learn:state', 'learn:forget', 'usage', 'usage:reset', 'cache:drop', 'access', 'key:state']);
+const PANEL_TYPES = new Set(['ask', 'session', 'stop', 'go', 'playbooks', 'playbook:save', 'playbook:delete', 'playbook:run', 'record:start', 'record:stop', 'learn:start', 'learn:stop', 'learn:finish', 'learn:state', 'learn:forget', 'usage', 'usage:reset', 'cache:drop', 'access', 'key:state', 'key:handoff']);
 // Our own extension pages only: the side panel, or the same page opened in a tab (tests, a pinned panel tab).
 // Content scripts report the web page's URL, and no extension page is web-accessible, so a site can't pass this.
 const fromPanel = sender => sender.id === chrome.runtime.id && typeof sender.url === 'string' && sender.url.startsWith(chrome.runtime.getURL(''));
@@ -1380,8 +1433,10 @@ async function handle(msg, sender) {
     case 'key:state': {
       const own = !!(await getKey());
       const endpoint = own ? null : await proxyEndpoint({ fresh: !!msg.fresh });
-      return { mode: own ? 'own' : endpoint ? 'proxy' : 'none', devServer: await devServer(), proxyReady: proxyCapable() };
+      const source = own ? (await chrome.storage.local.get('apiKeySource')).apiKeySource || 'manual' : null;
+      return { mode: own ? 'own' : endpoint ? 'proxy' : 'none', source, devServer: await devServer(), proxyReady: proxyCapable() };
     }
+    case 'key:handoff': return await keyHandoff(); // the panel opened: collect a key approved on /setup, if any
     case 'cache:drop': {
       // The user says a cached answer is wrong: forget it, and the next ask goes to Claude.
       const s = await getSession(msg.tabId);

@@ -1,0 +1,13 @@
+# Used by BuildKit for deploy/Dockerfile (the build context is the repository root).
+# Never send local secrets or state into the build.
+.git
+node_modules
+.scopos-*
+**/*.local
+**/*.local.json
+*.lnk
+research
+dev
+docs
+packages
+dist

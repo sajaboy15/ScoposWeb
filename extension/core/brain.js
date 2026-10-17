@@ -24,7 +24,9 @@
  * call(body, key, { endpoint }) sends to a Scopos server proxy instead; with no key, no credentials at all.
  */
 (function (root) {
-  const MODELS = { ask: 'claude-sonnet-5-5', locate: 'claude-haiku-5-5', learn: 'claude-opus-5-5' };
+  // Measured in research/10-model-eval.md: Sonnet writes guides as well as Opus (53 vs 55 guides, every form ends on
+  // its commit) for half the price; Haiku re-finds controls as well as Sonnet for a sixteenth.
+  const MODELS = { ask: 'claude-sonnet-5-5', locate: 'claude-haiku-5-5', learn: 'claude-sonnet-5-5' };
   const API_URL = 'https://api.anthropic.com/v1/messages';
   const API_VERSION = '2023-06-01';
   // Server-side refusal fallback ("default" picks the model per refusal category). Not offered for Haiku.
@@ -207,14 +209,14 @@ to reach a view, follow the → links from where the user is. dialogs and panels
 STEPS
 - one action per step, in the order the user performs them, starting from the user's current view.
 - element_ref is the ref of the control for that step (for example "V3.4"), taken only from the map. null only for a step with no control.
-- instruction is one short sentence naming the control the way it is labeled: "Нажмите «Новый счёт»".
+- instruction is one short sentence naming the control exactly as it is labeled on screen: "Click «New load»", «Нажмите «Новый счёт»».
 - action: click, type, select, or look.
 - value: when the user named what to enter, put it here: for a select, the matching option exactly as written in its options; for a text field, the text. otherwise null.
 - in a form, include every field the task needs and end with the control that finishes it (· commit, or the form's save, create or send button).
 - a step that only shows something (look) points at the table, list or region that shows it, or at its heading.
 - a step on a control marked · one per row names the generic action and tells the user to pick the record they need, in the interface language: "Click ⋯ (Actions) on the load you need", «Нажмите «⋯» у нужного груза», "Open the driver you need from the Name column". never name a record from the map (a number, a person, a company, a unit): the user's records are different. the same for a · one record screen: «the load's page», never "Load 1066".
 - when the way goes through a control marked · not opened, the steps end with a click on that control: never invent what it opens.
-write in the product's interface language. no markdown.
+LANGUAGE: answer and instructions are in the language of the user's question, whatever language the examples above or the product use; an English question gets English steps, a Russian one Russian. control labels stay exactly as on screen. no markdown.
 
 ${UNTRUSTED}`;
 
@@ -307,10 +309,16 @@ ${UNTRUSTED}`;
   }
 
   const CACHE_1H = { cache_control: { type: 'ephemeral', ttl: '1h' } };
-  function mapSystem(map, opts) {
+  const CACHE_5M = { cache_control: { type: 'ephemeral', ttl: '5m' } };
+  /**
+   * A complete map is identical for every request about this product, so it is cached. Writing the cache costs
+   * 1.25x input for 5 minutes and 2x for an hour, reading it 0.05x: the caller asks for '1h' only when questions
+   * come often (several an hour), otherwise a 5-minute cache catches follow-ups without paying for an hour.
+   */
+  function mapSystem(map, opts = {}) {
     const m = mapText(map, opts);
-    // A complete map is identical for every request about this product: cache it for an hour.
-    return [{ type: 'text', text: MAP_SYSTEM }, { type: 'text', text: `<product_map>\n${m.text}\n</product_map>`, ...(m.complete ? CACHE_1H : {}) }];
+    const ttl = opts.cacheTtl === '1h' ? CACHE_1H : opts.cacheTtl === 'none' ? {} : CACHE_5M;
+    return [{ type: 'text', text: MAP_SYSTEM }, { type: 'text', text: `<product_map>\n${m.text}\n</product_map>`, ...(m.complete ? ttl : {}) }];
   }
 
   // ---------------- learning: guides written once from the map ----------------
@@ -332,7 +340,7 @@ ${UNTRUSTED}`;
 - when the task changes something but the map shows no control that finishes it, the guide ends with its last field and continues_live is true.
 - continues_live is false for every other guide.
 - refs only from the map. no two guides for the same task.
-- name each guide as the task in the user's words and in the interface language, for example "Выставить счёт клиенту", "Пригласить коллегу". the name says what the user wants, not which button they press.
+- guides are written for the product's users: name and instructions in the interface language of the product (for an English product "Create a load", for a Russian one «Выставить счёт клиенту»). the name says what the user wants, not which button they press.
 - a task on one record (change a load, pay an invoice, edit a driver) goes through its · one per row control, and the step says to pick the record the user needs. neither the name nor any step names a record the study saw.`;
 
   function learnPrompt({ product, count, part = '', existing = [] }) {
@@ -474,7 +482,7 @@ ${UNTRUSTED}`;
       const details = [...g.ids.map(id => viewText(byId[id], isGlobal, fromRow)), g.stubs].filter(Boolean).join('\n');
       const system = [
         { type: 'text', text: MAP_SYSTEM },
-        { type: 'text', text: `<product_map>\n${plan.head}\n`, ...CACHE_1H },
+        { type: 'text', text: `<product_map>\n${plan.head}\n`, ...CACHE_5M }, // the parts of one learn run follow each other within minutes
         { type: 'text', text: `${details}\n</product_map>` },
       ];
       const others = plan.groups.filter((_, j) => j !== i).map(o => '- ' + o.label);
@@ -578,10 +586,10 @@ ${UNTRUSTED}`;
   }
 
   /** Answers a question from the map: steps across pages point at known controls, nothing is guessed. */
-  function buildAskMap({ question, map, current, history = [], product = '' }) {
+  function buildAskMap({ question, map, current, history = [], product = '', cacheTtl = '5m' }) {
     const messages = cleanHistory(history);
     messages.push({ role: 'user', content: `${product ? 'product: ' + capText(product, 80) + '\n' : ''}the user is on view ${current || 'unknown'}.\n${capText(question, 600)}\n\nif it is a question rather than a task, answer it in "answer" and return no steps.` });
-    return body('ask', mapSystem(map, { question, current }), messages, MAP_ASK_SCHEMA, { effort: 'low', maxTokens: 8000 });
+    return body('ask', mapSystem(map, { question, current, cacheTtl }), messages, MAP_ASK_SCHEMA, { effort: 'low', maxTokens: 8000 });
   }
 
   // History keeps only the questions and the short answers, never element ids or selectors.
@@ -681,13 +689,25 @@ ${UNTRUSTED}`;
   }
 
   /** Reads a streamed Messages response; returns { text, stop_reason, usage }. */
-  async function readStream(res, onText) {
+  // The API sends a ping at least every few seconds while it thinks: this long without a byte means the stream died.
+  const STALL_MS = 45000;
+  async function readStream(res, onText, signal) {
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '', text = '', stop = null;
     const usage = {};
+    // A dead connection can leave read() pending forever, even after the request's own timeout fired: race every
+    // read against silence and against the abort signal, and cancel the body when either wins.
+    const nextChunk = () => new Promise((resolve, reject) => {
+      let t = 0;
+      const cleanup = () => { clearTimeout(t); if (signal) signal.removeEventListener('abort', onAbort); };
+      const onAbort = () => { cleanup(); reader.cancel().catch(() => {}); reject(signal.reason || new Error('aborted')); };
+      if (signal) { if (signal.aborted) { onAbort(); return; } signal.addEventListener('abort', onAbort, { once: true }); }
+      t = setTimeout(() => { cleanup(); reader.cancel().catch(() => {}); const e = new Error('Claude перестал отвечать посреди ответа. Пробую ещё раз.'); e.retry = true; reject(e); }, STALL_MS);
+      reader.read().then(r => { cleanup(); resolve(r); }, e => { cleanup(); reject(e); });
+    });
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await nextChunk();
       if (done) break;
       buf += dec.decode(value, { stream: true });
       let i;
@@ -740,7 +760,7 @@ ${UNTRUSTED}`;
   async function call(requestBody, apiKey, { fromBrowser = true, signal, timeoutMs, onText, onUsage, endpoint } = {}) {
     const url = endpoint || API_URL;
     const hdrs = headers(apiKey, fromBrowser, !!requestBody.fallbacks, endpoint);
-    const limit = timeoutMs || (requestBody.model === MODELS.learn ? 180000 : 60000);
+    const limit = timeoutMs || ((requestBody.max_tokens || 0) >= 16000 ? 180000 : 60000); // learning writes a lot
     const timer = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(limit) : null;
     const sig = signal && timer && AbortSignal.any ? AbortSignal.any([signal, timer]) : signal || timer || undefined;
     let lastError = null;
@@ -771,7 +791,7 @@ ${UNTRUSTED}`;
           if (onUsage && data.usage) onUsage(data.usage, requestBody.model);
           return parse(data);
         }
-        const out = await readStream(res, onText);
+        const out = await readStream(res, onText, sig);
         if (onUsage) onUsage(out.usage, requestBody.model);
         return parseText(out);
       } catch (e) {

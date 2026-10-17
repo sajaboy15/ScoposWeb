@@ -60,7 +60,7 @@ try {
     self.__realCall = self.__realCall || Brain.call;
     self.__calls = []; self.__replies = [];
     Brain.call = async (body, key, opts = {}) => { // opts.endpoint: the proxy, when there is no key
-      __calls.push({ model: body.model, key, endpoint: opts.endpoint || null, system: JSON.stringify(body.system || '').slice(0, 200) });
+      __calls.push({ model: body.model, maxTokens: body.max_tokens, key, endpoint: opts.endpoint || null, system: JSON.stringify(body.system || '').slice(0, 200) });
       if (opts.onUsage) opts.onUsage({ input_tokens: 2000, output_tokens: 200 }, body.model);
       const r = __replies.shift();
       return typeof r === 'function' ? r(body) : (r || { answer: '', steps: [] });
@@ -231,7 +231,7 @@ try {
   const auto = await W(`maybeAutoGuides('${origin}')`);
   ok(auto.added >= 1, 'auto-guides wrote and merged a guide', auto);
   const callsB = await W(`__calls.slice(${callsA})`);
-  ok(callsB.length >= 1 && callsB.every(c => /opus/.test(c.model)), 'learn-model calls only for the new views', callsB.map(c => c.model));
+  ok(callsB.length >= 1 && callsB.every(c => c.maxTokens >= 16000), 'learn calls (guide writing) only for the new views', callsB.map(c => c.model + '/' + c.maxTokens));
   const pbs = await W(`getPlaybooks('${origin}')`);
   ok(pbs.some(p => p.learned && p.name === 'Нажать кнопку 1 на новом экране') && pbs.some(p => p.id === 'pb-live'), 'old guides kept, new one added', pbs.map(p => p.name));
   const again = await W(`maybeAutoGuides('${origin}')`);

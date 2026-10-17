@@ -52,7 +52,7 @@ code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background
 <div class="wrap">
   <div class="brand"><span class="mark" aria-hidden="true"></span>Scopos</div>
   <h1>Три шага, и Scopos ведёт по любому сайту</h1>
-  <p class="lead">Ключ Claude хранится только на этом компьютере, в файле рядом с проектом. В браузер и на чужие серверы он не уходит, только в API Anthropic.</p>
+  <p class="lead">Ключ Claude хранится только на этом компьютере, в файле рядом с проектом. На чужие серверы он не уходит, только в API Anthropic, а в браузер попадает, только если вы сами передадите его расширению Scopos (шаг 4).</p>
 
   <section class="step" id="s1">
     <span class="n">1</span>
@@ -100,8 +100,10 @@ code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background
       <div class="path"><code id="ext-path">…</code><button class="btn" id="copy-path" type="button">Скопировать</button></div>
       <ol start="3" style="margin-top:12px">
         <li>Нажмите на значок Scopos на панели Chrome (или <code>Alt+Shift+S</code>). Ключ второй раз вставлять не нужно: пока этот сервер запущен, расширение спрашивает Claude через него.</li>
+        <li>Чтобы расширение работало и без этого сервера, нажмите «Передать ключ расширению Scopos». Ключ один раз уйдёт только в это расширение и останется в его хранилище в Chrome.</li>
       </ol>
       <div class="state" id="ext-state" aria-live="polite"></div>
+      <div class="state" id="handoff-state" aria-live="polite" hidden></div>
       <p class="note">Chrome разрешает ставить расширения из папки только вручную, поэтому первый раз это делаете вы. Дальше новые версии ставятся сами: расширение раз в минуту сверяется с этой папкой и перезагружается, когда ничего не делает.</p>
     </div>
   </section>
@@ -124,7 +126,7 @@ function show(info, extra = '') {
   if (info.error && !info.set) $('#key-state').innerHTML += `<span class="pill bad">${esc(info.error)}</span>`;
 }
 let info = {};
-api('GET').then(i => { info = i; show(i); if (!i.set) $('#key').focus(); });
+api('GET').then(i => { info = i; show(i); if (!i.set) $('#key').focus(); extState(); });
 fetch('/api/scopos/knowledge').then(r => r.json()).then(k => {
   if (!k.guides || !k.guides.length) return;
   $('#s2').classList.add('done');
@@ -176,7 +178,40 @@ async function extState() {
     : st.upToDate
       ? `<span class="pill ok">Расширение: загружена актуальная версия${v} ✓</span>${quiet ? `<span class="note">на связи ${esc(ago(st.loaded.seenAt))}</span>` : ''}`
       : `<span class="pill need">В Chrome старая версия</span><span>${quiet ? `Расширение не отзывалось ${esc(ago(st.loaded.seenAt))}: обновится само, когда Chrome будет открыт.` : 'Она обновится сама через минуту.'}</span>`;
+  handoffState(st);
 }
+// The one-time key handoff: shown once an extension has said hello and this server has a key. The approval is for
+// exactly the id shown (compare it with chrome://extensions), lasts 2 minutes and is used once.
+let handoffId = '', handoffError = '', handoffPoll = 0;
+function handoffState(st) {
+  const box = $('#handoff-state');
+  const h = (st && st.handoff) || {};
+  const id = st && st.loaded && st.loaded.id;
+  clearTimeout(handoffPoll);
+  if (!id || !info.set) { box.hidden = true; box.innerHTML = ''; return; }
+  handoffId = id;
+  box.hidden = false;
+  const idNote = `<span class="note">id расширения: <code>${esc(id)}</code></span>`;
+  const button = label => `<button class="btn soft" id="handoff" type="button">${label}</button>`;
+  if (h.pending && h.pending.id === id) {
+    box.innerHTML = `<span class="spin" aria-hidden="true"></span><span>Жду, когда расширение заберёт ключ. Откройте панель Scopos в Chrome, обычно это занимает до минуты.</span>${idNote}`;
+    handoffPoll = setTimeout(extState, 2000);
+  } else if (h.done && h.done.id === id) {
+    box.innerHTML = `<span class="pill ok">Ключ передан расширению ✓</span><span class="note">Теперь Scopos в Chrome работает и без этого сервера. Убрать ключ из расширения: панель Scopos → «Настройки» → «Убрать ключ из расширения».</span>`;
+  } else {
+    box.innerHTML = `${button('Передать ключ расширению Scopos')}${h.expired ? '<span class="pill bad">Расширение не забрало ключ за 2 минуты. Нажмите ещё раз и откройте панель Scopos.</span>' : ''}${handoffError ? `<span class="pill bad">${esc(handoffError)}</span>` : ''}${idNote}`;
+  }
+}
+$('#handoff-state').addEventListener('click', async e => {
+  if (!e.isTrusted || e.target.id !== 'handoff' || !handoffId) return;
+  e.target.disabled = true;
+  handoffError = '';
+  const res = await fetch('/api/ext/key-handoff/approve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: handoffId }) })
+    .then(r => r.json().catch(() => ({ error: `Сервер ответил ошибкой ${r.status}` })))
+    .catch(() => ({ error: 'Сервер не отвечает. Он запущен?' }));
+  if (res.error) handoffError = res.error;
+  extState();
+});
 extState();
 setInterval(() => { if (!document.hidden) extState(); }, 10000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) extState(); });

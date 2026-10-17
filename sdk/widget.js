@@ -13,12 +13,18 @@
  * running walkthrough is kept in sessionStorage so it continues after page loads.
  * Saved scenarios run instantly and never reach the server; the server caches
  * answers for everyone, so a repeated question costs nothing either.
+ *
+ * Normally this file is part of scopos-core.<hash>.js, which the small loader (sdk/loader.js, served as
+ * scopos.js) loads: the config then comes from the loader (S._boot), the loader's launcher is swapped for
+ * this one, calls queued on the loader's Scopos.widget stub are run, and the learn-mode code
+ * (explore.js + guard.js) is loaded only when learn mode is used.
  */
 (function () {
   const S = window.Scopos;
-  if (!S || S.widget) return;
-  const me = document.currentScript || document.querySelector('script[data-endpoint][src*="scopos"]');
-  const data = (me && me.dataset) || {};
+  if (!S || (S.widget && !S.widget._stub)) return;
+  const ldr = S._boot || null; // the loader's handover (dist/scopos.js), if it loaded us
+  const me = ldr ? null : document.currentScript || document.querySelector('script[data-endpoint][src*="scopos"]');
+  const data = ldr ? ldr.data || {} : (me && me.dataset) || {};
   const localHost = /^(localhost|127\.0\.0\.1|\[::1\])$|\.localhost$/i.test(location.hostname);
   const cfg = {
     endpoint: data.endpoint || '/api/scopos',
@@ -52,7 +58,7 @@
   };
   const newRun = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-  if (cfg.playbooksUrl) fetch(cfg.playbooksUrl).then(r => (r.ok ? r.json() : [])).then(list => { if (Array.isArray(list)) playbooks = list; }).catch(() => {});
+  const playbooksReady = cfg.playbooksUrl ? fetch(cfg.playbooksUrl).then(r => (r.ok ? r.json() : [])).then(list => { if (Array.isArray(list)) playbooks = list; }).catch(() => {}) : Promise.resolve();
 
   // Guides the explorer and Claude wrote for this product (see learn mode below).
   let learned = null; // { summary, guides, views, learnedAt }
@@ -62,7 +68,7 @@
     const ids = new Set(learned.guides.map(g => g.id));
     playbooks = [...learned.guides, ...playbooks.filter(p => !ids.has(p.id))];
   };
-  fetch(cfg.endpoint + '/knowledge').then(r => (r.ok ? r.json() : null)).then(k => { addLearned(k); render(); }).catch(() => {});
+  const knowledgeReady = fetch(cfg.endpoint + '/knowledge').then(r => (r.ok ? r.json() : null)).then(k => { addLearned(k); render(); }).catch(() => {});
 
   // ---------- requests to the vendor's server ----------
   /** POSTs JSON. With onProgress, asks for a streamed reply (NDJSON progress lines, then the result). */
@@ -113,6 +119,8 @@
     },
   };
   const learnHeaders = () => (cfg.learnToken ? { 'x-scopos-learn-token': cfg.learnToken } : {});
+  // The explorer and the network guard (~150 KB) come in their own file, fetched only when learn mode is used.
+  const needLearn = () => (S.explore ? Promise.resolve() : ldr && ldr.learn ? ldr.load(ldr.learn) : Promise.reject(new Error('Код режима изучения не загружен.')));
   let learning = null; // { status: 'confirm'|'exploring'|'writing'|'done'|'error', ... }
   let learnTimer = 0;
   const LEARN_MS = 180e3;
@@ -158,7 +166,7 @@
     if (!cfg.learn) return;
     const ctl = new AbortController(), clear = deadline(ctl, 30000);
     try {
-      const ok = await post('/learn', { check: true }, { headers: learnHeaders(), signal: ctl.signal });
+      const [ok] = await Promise.all([post('/learn', { check: true }, { headers: learnHeaders(), signal: ctl.signal }), needLearn()]);
       if (ok && ok.key === false) { learning = { status: 'error', error: 'На сервере не подключён ключ Claude: откройте /setup. Без него гайды не написать.' }; render(); return; }
     } catch (e) {
       learning = { status: 'error', error: ctl.signal.aborted ? 'Сервер не ответил. Попробуйте ещё раз.' : e.message || 'Сервер не разрешил изучение.' }; render(); return;
@@ -494,14 +502,34 @@ input:focus-visible { outline: none; }
     });
   }
 
+  /** A ready-made guide by id or name (learned, recorded or from data-playbooks). Resolves to whether it started. */
+  async function startGuide(name) {
+    await Promise.all([knowledgeReady, playbooksReady]);
+    const key = norm(name);
+    const pb = playbooks.find(p => p.id === name) || playbooks.find(p => norm(p.name) === key);
+    if (!pb) return false;
+    learning = null;
+    stopAsk();
+    runSteps(newRun(), pb.name, `Сценарий «${pb.name}»`, pb.steps, 'playbook', !!pb.live);
+    return true;
+  }
+
   async function boot() {
     (document.body || document.documentElement).appendChild(host);
     state = load();
     // A request that was in flight when the page unloaded is gone: don't show a spinner forever.
     if (state && state.status === 'thinking') state = { ...state, status: 'error', error: 'Ответ прервался при переходе. Спросите ещё раз.' };
     render();
+    // Our launcher is drawn: the loader's goes away in the same task (no flicker), keeping the focus if it had it.
+    if (ldr && ldr.handoff && ldr.handoff()) root.querySelector('.launch').focus();
+    // Calls made on the loader's stub (a click on its launcher, Scopos.widget.* from the page) run now.
+    for (const [m, args, ok, fail] of ldr && ldr.queue ? ldr.queue.splice(0) : []) {
+      try { Promise.resolve(S.widget[m](...args)).then(ok, fail); } catch (e) { fail(e); }
+    }
     if (cfg.learn) {
-      if (await S.explore.resume(learnOpts)) { learning = { status: 'exploring', views: 0, probes: 0 }; render(); return; }
+      let walking = false;
+      try { walking = !!sessionStorage.getItem(LEARN_KEY); } catch (e) { walking = false; }
+      if (walking && (await needLearn().then(() => S.explore.resume(learnOpts), () => false))) { learning = { status: 'exploring', views: 0, probes: 0 }; render(); return; }
     } else {
       try { sessionStorage.removeItem(LEARN_KEY); } catch (e) { /* ignore */ }
     }
@@ -513,8 +541,12 @@ input:focus-visible { outline: none; }
     }
     if (state && state.status === 'running' && (state.index < state.steps.length || state.live)) start(state.index);
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
-
-  S.widget = { open: () => setOpen(true), ask, cfg: { endpoint: cfg.endpoint, product: cfg.product, learn: cfg.learn } };
+  // The API goes in before boot(), which runs the calls queued on the loader's stub.
+  S.widget = { open: () => setOpen(true), ask, startGuide, cfg: { endpoint: cfg.endpoint, product: cfg.product, learn: cfg.learn } };
   if (cfg.learn) S.widget.learn = confirmLearning;
+  // Loaded on idle with nothing waiting: boot in the next task, so evaluating this file and building the widget
+  // are two short tasks instead of one long one (weak machines). A running guide or a queued click boots at once.
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else if (ldr && !ldr.urgent && !(ldr.queue && ldr.queue.length)) setTimeout(boot, 0);
+  else boot();
 })();

@@ -4,7 +4,8 @@
  *
  * Every minute (alarm 'scopos-dev-update') and on worker start it asks the local Scopos server what is on disk
  * (GET <devServer>/api/ext/version -> { version, sig, files, changedAt }), tells it what Chrome has loaded
- * (POST /api/ext/hello { version, sig, id }, shown on /setup), and when the two differ it calls
+ * (POST /api/ext/hello { version, sig, id }, shown on /setup; a reply with keyOffer: true means the user approved
+ * the one-time key handoff on /setup, and the background then collects the key), and when the two differ it calls
  * chrome.runtime.reload(), but only while self.scoposBusy() is false (a guide, an answer or an exploration in
  * flight); otherwise it tries again a minute later. After any install or reload it injects the manifest's content
  * scripts into the open http(s) tabs, so pages need no refresh.
@@ -109,14 +110,21 @@
   const headless = () => /HeadlessChrome/.test((self.navigator && navigator.userAgent) || '');
   async function optedIn() { try { return !!local && (await local.get('devAutoUpdate')).devAutoUpdate === true; } catch (e) { return false; } }
 
+  /** Tells the server what is loaded. Its reply says keyOffer: true when the user approved, on /setup, handing its
+   *  Claude key to this very extension: then the background collects it (self.scoposKeyHandoff, background.js). */
   async function hello(base, loaded) {
+    let reply = null;
     try {
-      await fetch(base + '/api/ext/hello', {
+      const r = await fetch(base + '/api/ext/hello', {
         method: 'POST', cache: 'no-store', signal: timeout(1500),
         headers: { 'content-type': 'application/json', 'x-scopos-ext': chrome.runtime.id },
         body: JSON.stringify({ version: loaded.version, sig: loaded.sig, id: chrome.runtime.id, headless: headless() }),
       });
+      if (r.ok) reply = await r.json().catch(() => null);
     } catch (e) { /* the server is gone; next minute */ }
+    if (reply && reply.keyOffer === true && typeof self.scoposKeyHandoff === 'function') {
+      try { state.handoff = await self.scoposKeyHandoff({ force: true }); } catch (e) { state.handoff = { error: true }; }
+    }
   }
 
   function busy() {

@@ -1,0 +1,19 @@
+{
+  "name": "@scopos/react",
+  "version": "0.1.0",
+  "description": "Scopos: an AI guide inside your web product. <ScoposProvider> and useScopos() for React.",
+  "type": "module",
+  "main": "./index.js",
+  "module": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./index.js", "default": "./index.js" }
+  },
+  "files": ["index.js", "index.d.ts"],
+  "sideEffects": false,
+  "peerDependencies": {
+    "react": ">=17"
+  },
+  "license": "UNLICENSED",
+  "publishConfig": { "access": "public" }
+}

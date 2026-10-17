@@ -1,0 +1,16 @@
+{
+  "name": "@scopos/js",
+  "version": "0.1.0",
+  "description": "Scopos: an AI guide inside your web product. Adds the Scopos loader to the page, no framework needed.",
+  "type": "module",
+  "main": "./index.js",
+  "module": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": { "types": "./index.d.ts", "import": "./index.js", "default": "./index.js" }
+  },
+  "files": ["index.js", "index.d.ts"],
+  "sideEffects": false,
+  "license": "UNLICENSED",
+  "publishConfig": { "access": "public" }
+}

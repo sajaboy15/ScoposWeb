@@ -6,7 +6,8 @@
 //   POST /api/scopos  { question, page, history }               -> { answer, steps, source }
 //                     { locate: { instruction, oldText }, page, candidates } -> { element_id }
 //   GET  /api/scopos/knowledge  learned guides for the widget; questions are then answered from the whole map
-//   GET  /scopos.js   the SDK bundle (built in memory, rebuilt when a source file changes)
+//   GET  /scopos.js   the SDK loader; GET /scopos-core.<hash>.js, /scopos-learn.<hash>.js its chunks (sdk/build.mjs:
+//                     built in memory from the sources, rebuilt when one changes, or read from dist/ where they are absent)
 //   GET  /            the demo app (Ledgerly)
 // Every route: the Host header must be localhost:PORT, 127.0.0.1:PORT, [::1]:PORT or one listed in SCOPOS_HOSTS /
 // SCOPOS_ORIGINS (DNS rebinding); anything else gets 403. HTML is never frameable (X-Frame-Options, frame-ancestors).
@@ -17,7 +18,10 @@
 //   POST /api/scopos/learn   { map } from the explorer -> guides written by Claude
 //                            (also allowed with header x-scopos-learn-token = SCOPOS_LEARN_TOKEN)
 //   GET  /api/scopos/stats   token usage, cache hits, today's budget, this month's spend { month: { spent, cap } }
-//   GET  /api/ext/status     { disk: {version, sig}, loaded: {version, sig, id, seenAt} | null, upToDate, recent }
+//   GET  /api/ext/status     { disk: {version, sig}, loaded: {version, sig, id, seenAt} | null, upToDate, recent,
+//                              handoff: { pending: {id, expiresAt} | null, expired, done: {id, at} | null } }
+//   POST /api/ext/key-handoff/approve { id }  /setup's «Передать ключ расширению»: a one-time approval for the loaded
+//                            extension id, 2 minutes (Origin must be this page, JSON only)
 // The Chrome extension, from this machine only (loopback + local Host + no proxy + Origin chrome-extension://<id>):
 //   POST /api/claude         a Messages API request built by brain.js, forwarded with this server's key and streamed
 //                            back unchanged (SSE), so the extension needs no key of its own. Validated: model is one
@@ -25,7 +29,9 @@
 //   GET  /api/ext/version    { version, sig, files, changedAt, claude }: what is on disk under extension/ (see extSig);
 //                            claude = this server has a key, so /api/claude can answer
 //   POST /api/ext/hello      { version, sig, id, headless }: what Chrome has loaded (core/update.js, every minute);
-//                            a headless Chrome (test harness) never counts as "loaded", it only shows in status.recent
+//                            a headless Chrome (test harness) never counts as "loaded", it only shows in status.recent;
+//                            the reply has keyOffer: true while a handoff approval for this id is open
+//   POST /api/ext/key-handoff {}  -> { key } once, only for Origin chrome-extension://<the approved id> (see handoffApprove)
 // Safety-test counters (same origin, no key): POST /api/tms/write, GET /api/tms/writes, POST /api/tms/writes/reset,
 //   and the same under /api/demo/ for Ledgerly.
 //
@@ -46,7 +52,7 @@ import { createRequire } from 'node:module';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { dirname, join, normalize, extname, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { build, signature } from '../sdk/build.mjs';
+import { sdkFile } from '../sdk/build.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const Brain = createRequire(import.meta.url)('../extension/core/brain.js');
@@ -167,13 +173,21 @@ function persistUsage() {
 }
 
 // ---------- usage and cost, logged per call ----------
-const PRICE = { 'claude-opus-5-5': [4, 20], 'claude-sonnet-5-5': [2, 10], 'claude-haiku-5-5': [0.1, 0.5] }; // $ per 1M tokens
+// A 5-minute cache write costs 1.25x input, a 1-hour one 2x; the usage block says which when it can.
+const cacheWriteTokens = u => {
+  const c = u && u.cache_creation;
+  if (c && typeof c === 'object') return (c.ephemeral_5m_input_tokens || 0) * 1.25 + (c.ephemeral_1h_input_tokens || 0) * 2;
+  return (u.cache_creation_input_tokens || 0) * 2;
+};
+// $ per 1M tokens: input, output, cache-read multiplier (platform.claude.com pricing, checked 2026-10-17;
+// a 1h cache write is 2x input for all of them).
+const PRICE = { 'claude-fable-5-1': [10, 50, 0.025], 'claude-opus-5-5': [4, 20, 0.05], 'claude-sonnet-5-5': [2, 10, 0.05], 'claude-haiku-5-5': [0.1, 0.5, 0.1] }; // $ per 1M tokens
 const stats = { since: new Date().toISOString(), calls: 0, cacheHits: 0, guideHits: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, byKind: {} };
 function usageLogger(kind) {
   return (u, model) => {
     if (!u) return;
-    const [pi, po] = PRICE[model] || PRICE['claude-opus-5-5'];
-    const cost = ((u.input_tokens || 0) * pi + (u.cache_creation_input_tokens || 0) * pi * 2 + (u.cache_read_input_tokens || 0) * pi * 0.1 + (u.output_tokens || 0) * po) / 1e6;
+    const [pi, po, cr] = PRICE[model] || PRICE['claude-opus-5-5'];
+    const cost = ((u.input_tokens || 0) * pi + cacheWriteTokens(u) * pi + (u.cache_read_input_tokens || 0) * pi * cr + (u.output_tokens || 0) * po) / 1e6;
     stats.calls++;
     stats.tokens.input += u.input_tokens || 0; stats.tokens.output += u.output_tokens || 0;
     stats.tokens.cacheRead += u.cache_read_input_tokens || 0; stats.tokens.cacheWrite += u.cache_creation_input_tokens || 0;
@@ -303,6 +317,14 @@ function responder(req, res) {
 }
 
 // ---------- POST /api/scopos ----------
+// Questions in the last hour: an hour-long map cache pays off only when they come often.
+const recentAsks = [];
+function askCacheTtl() {
+  const now = Date.now();
+  while (recentAsks.length && now - recentAsks[0] > 3600000) recentAsks.shift();
+  recentAsks.push(now);
+  return recentAsks.length >= 3 ? '1h' : '5m';
+}
 async function api(req, res) {
   let body;
   try { body = await readBody(req, 200_000); } catch (e) { return json(res, 400, { error: 'Неверный запрос' }); }
@@ -347,7 +369,7 @@ async function api(req, res) {
       const why = spend();
       if (why) return json(res, 429, { error: why });
       // The product name is pinned at learn time: a client can't change the cached prefix or the prompt.
-      const out = await Brain.call(Brain.buildAskMap({ question, map, current, history, product: knowledge.product || '' }), KEY, { fromBrowser: false, signal, onText: r.onText, onUsage: usageLogger('ask-map') });
+      const out = await Brain.call(Brain.buildAskMap({ question, map, current, history, product: knowledge.product || '', cacheTtl: askCacheTtl() }), KEY, { fromBrowser: false, signal, onText: r.onText, onUsage: usageLogger('ask-map') });
       const steps = Brain.refSteps(out.steps || [], map, question);
       const answer = String(out.answer || '').slice(0, 600);
       if (cacheable) cachePut(k, { answer, steps });
@@ -448,7 +470,7 @@ function extensionPath() {
 // ---------- /api/key (admin) ----------
 async function keyApi(req, res) {
   if (req.method === 'GET') return json(res, 200, { set: !!KEY, last4: KEY ? KEY.slice(-4) : null, fromEnv: !!process.env.ANTHROPIC_API_KEY, extensionPath: extensionPath() });
-  if (req.method === 'DELETE') { KEY = ''; await rm(KEY_FILE, { force: true }); return json(res, 200, { set: false }); }
+  if (req.method === 'DELETE') { KEY = ''; keyHandoff.pending = null; await rm(KEY_FILE, { force: true }); return json(res, 200, { set: false }); }
   if (req.method !== 'POST') return json(res, 405, { error: 'Метод не поддерживается' });
   let body;
   try { body = await readBody(req, 10_000); } catch (e) { return json(res, 400, { error: 'Неверный запрос' }); }
@@ -652,11 +674,60 @@ async function extHello(req, res, id) {
   extRecent.push({ ...seen, headless: b.headless === true });
   if (extRecent.length > 5) extRecent.shift();
   if (b.headless !== true) extLoaded = seen;
-  return json(res, 200, { ok: true, upToDate: seen.sig === extSig().sig });
+  // keyOffer: the user approved a key handoff for exactly this id on /setup; the extension then asks for it.
+  return json(res, 200, { ok: true, upToDate: seen.sig === extSig().sig, ...(handoffOpenFor(id) ? { keyOffer: true } : {}) });
 }
 function extStatus() {
   const { version, sig } = extSig();
-  return { disk: { version, sig }, loaded: extLoaded, upToDate: !!(extLoaded && extLoaded.sig === sig), recent: extRecent };
+  return { disk: { version, sig }, loaded: extLoaded, upToDate: !!(extLoaded && extLoaded.sig === sig), recent: extRecent, handoff: handoffStatus() };
+}
+
+// ---------- the one-time key handoff: /setup approves, the extension collects ----------
+// POST /api/ext/key-handoff/approve { id }  (admin: /setup only; Origin must be this server, JSON)
+//   -> { ok, id, expiresAt }: one approval for exactly that extension id (the one /api/ext/status shows as loaded),
+//      valid HANDOFF_TTL_MS, replacing any earlier one.
+// POST /api/ext/key-handoff {}  (the extension: loopback, local Host, no proxy, Origin chrome-extension://<approved id>)
+//   -> { key } once; the approval is consumed. Without an open approval for that id: 403, nothing else said.
+// The key is in no other response and never logged; /api/ext/status shows only { pending, done } without it.
+// SCOPOS_HANDOFF_TTL_MS (tests only) can shorten the 2 minutes, never lengthen them.
+const HANDOFF_TTL_MS = Math.min(2 * 60 * 1000, +process.env.SCOPOS_HANDOFF_TTL_MS > 0 ? +process.env.SCOPOS_HANDOFF_TTL_MS : Infinity);
+const keyHandoff = { pending: null, done: null }; // pending: { id, expiresAt }; done: { id, at }
+const handoffOpenFor = id => !!(KEY && keyHandoff.pending && keyHandoff.pending.id === id && Date.now() < keyHandoff.pending.expiresAt);
+function handoffStatus() {
+  const p = keyHandoff.pending;
+  return {
+    pending: p && Date.now() < p.expiresAt ? { id: p.id, expiresAt: p.expiresAt } : null,
+    expired: !!(p && Date.now() >= p.expiresAt),
+    done: keyHandoff.done,
+  };
+}
+async function handoffApprove(req, res) {
+  if (req.method !== 'POST') return json(res, 405, { error: 'Метод не поддерживается' });
+  // CSRF: a JSON POST (a cross-site form can't send that without a preflight we never answer) whose Origin is this
+  // very page. The Origin is required here: a request without one is not the /setup page.
+  const host = String(req.headers.host || '').toLowerCase();
+  if (req.headers.origin !== `http://${host}`) return json(res, 403, { error: 'Только со страницы /setup' });
+  const site = req.headers['sec-fetch-site'];
+  if (site != null && site !== 'same-origin') return json(res, 403, { error: 'Только со страницы /setup' });
+  if (!isJson(req)) return json(res, 415, { error: 'Нужен JSON' });
+  let b;
+  try { b = await readBody(req, 2000); } catch (e) { return json(res, 400, { error: 'Неверный запрос' }); }
+  const id = String(b.id || '');
+  if (!/^[a-p]{32}$/.test(id) || !extPinned(id)) return json(res, 400, { error: 'Неверный id расширения' });
+  if (!extLoaded || extLoaded.id !== id) return json(res, 409, { error: 'Это расширение ещё не подключалось к серверу. Откройте Chrome с Scopos и подождите минуту.' });
+  if (!KEY) return json(res, 412, { error: 'Сначала сохраните ключ в шаге 1' });
+  keyHandoff.pending = { id, expiresAt: Date.now() + HANDOFF_TTL_MS };
+  console.log(`[scopos] ключ можно передать расширению ${id} (2 минуты)`);
+  return json(res, 200, { ok: true, id, expiresAt: keyHandoff.pending.expiresAt });
+}
+/** Called with the id extCaller took from the Origin (required here, see the route). */
+async function handoffCollect(req, res, id) {
+  try { await readBody(req, 2000); } catch (e) { return json(res, 400, { error: 'Неверный запрос' }); }
+  if (!handoffOpenFor(id)) return json(res, 403, { error: 'Нет разрешения на передачу ключа' });
+  keyHandoff.pending = null; // one use
+  keyHandoff.done = { id, at: new Date().toISOString() };
+  console.log(`[scopos] ключ передан расширению ${id}`);
+  return json(res, 200, { key: KEY });
 }
 
 // ---------- write counters for the safety tests (TMS and Ledgerly demos) ----------
@@ -693,11 +764,17 @@ async function file(res, path, { setup = false } = {}) {
 // Windows resolves aliases of one file: any case, a trailing dot or space, "::$DATA" streams, 8.3 short names (~1).
 const winAlias = p => /[:\\~]|[. ]$|[. ]\//.test(p);
 const SETUP_FILE = '/demo/setup.html';
-let bundle = { sig: '', code: '' };
-function sdkBundle() {
-  const sig = signature();
-  if (sig !== bundle.sig) bundle = { sig, code: build({ write: false }) };
-  return bundle.code;
+// The SDK: the loader /scopos.js (revalidated every time, a few KB) and its content-hashed chunks (cached forever).
+const SDK_PATH = /^\/(scopos\.js|scopos-(core|learn)\.[0-9a-f]{10}\.js)$/;
+function sdk(req, res, name) {
+  const f = sdkFile(name);
+  if (!f) { res.writeHead(404); return res.end('Not found'); }
+  const head = { 'content-type': TYPES['.js'], 'cache-control': f.immutable ? 'public, max-age=31536000, immutable' : 'no-cache', etag: f.etag, vary: 'accept-encoding', 'x-content-type-options': 'nosniff' };
+  if (req.headers['if-none-match'] === f.etag) { res.writeHead(304, head); return res.end(); }
+  const gz = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+  const body = gz ? f.gzip : f.body;
+  res.writeHead(200, { ...head, 'content-length': body.length, ...(gz ? { 'content-encoding': 'gzip' } : {}) });
+  res.end(body);
 }
 
 async function handle(req, res) {
@@ -709,6 +786,18 @@ async function handle(req, res) {
 
     // The extension's routes: this machine only, from a chrome-extension:// origin. They come before the same-origin
     // rule below, which they replace with their own (CORS for extension origins only, never for web pages).
+    // The key handoff, collected by the extension: Origin chrome-extension://<id> is required (x-scopos-ext alone
+    // won't do), and the id must be the one approved on /setup in the last 2 minutes.
+    if (path === '/api/ext/key-handoff') {
+      if (req.method === 'OPTIONS') return extPreflight(req, res);
+      if (!localAdmin(req)) return json(res, 403, { error: 'Только с этого компьютера' });
+      extCors(req, res);
+      if (req.method !== 'POST') return json(res, 405, { error: 'Метод не поддерживается' });
+      if (!isJson(req)) return json(res, 415, { error: 'Нужен JSON' });
+      const id = EXT_ORIGIN.test(String(req.headers.origin || '')) ? extCaller(req) : null;
+      if (!id) return json(res, 403, { error: 'Только для расширения Scopos на этом компьютере' });
+      return await handoffCollect(req, res, id);
+    }
     if (path === '/api/claude' || path === '/api/ext/version' || path === '/api/ext/hello') {
       if (req.method === 'OPTIONS') return extPreflight(req, res);
       if (!localAdmin(req)) return json(res, 403, { error: 'Только с этого компьютера' });
@@ -739,8 +828,9 @@ async function handle(req, res) {
 
     // The setup page is admin-only under any name it can be reached by (/setup, /demo/setup.html, /demo//SETUP.HTML on Windows).
     const isSetup = path === '/setup' || path.replace(/\/{2,}/g, '/').toLowerCase() === SETUP_FILE;
-    const admin = isSetup || path === '/api/key' || path === '/api/scopos/stats' || path === '/api/ext/status';
+    const admin = isSetup || path === '/api/key' || path === '/api/scopos/stats' || path === '/api/ext/status' || path === '/api/ext/key-handoff/approve';
     if (admin && !localAdmin(req)) return json(res, 403, { error: 'Только с этого компьютера' });
+    if (path === '/api/ext/key-handoff/approve') return await handoffApprove(req, res);
 
     // Every state-changing request: JSON only, from this origin only. No CORS headers are ever sent.
     if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -756,7 +846,8 @@ async function handle(req, res) {
     if (path === '/api/scopos/knowledge') return json(res, 200, knowledge ? { learnedAt: knowledge.learnedAt, summary: knowledge.summary, guides: knowledge.guides, views: knowledge.map.views.length } : { guides: [] });
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 404, { error: 'Not found' });
     if (isSetup) return await file(res, 'demo/setup.html', { setup: true });
-    if (path === '/scopos.js') { const code = sdkBundle(); res.writeHead(200, { 'content-type': TYPES['.js'], 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' }); return res.end(code); }
+    const sdkPath = SDK_PATH.exec(path);
+    if (sdkPath) return sdk(req, res, sdkPath[1]);
     if (path === '/' || path === '/index.html') return await file(res, 'demo/index.html');
     if (!winAlias(path)) {
       if (/^\/demo\//.test(path)) return await file(res, path.endsWith('/') ? path + 'index.html' : path); // /demo/tms/ -> index.html

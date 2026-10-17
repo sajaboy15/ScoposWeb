@@ -1,0 +1,38 @@
+# One command, from the repository root:
+#   cp deploy/.env.example deploy/.env    # put your Claude key and origins there
+#   docker compose -f deploy/docker-compose.yml up -d --build
+# Compose reads deploy/.env for the values below. Then http://localhost:4173/scopos.js answers; see deploy/README.md for wiring it into your app.
+services:
+  scopos:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: scopos-server:latest
+    restart: unless-stopped
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?ANTHROPIC_API_KEY is required (deploy/.env)}
+      # Your app's origins, comma-separated: https://app.example.com. Their hosts are accepted in Host too.
+      SCOPOS_ORIGINS: ${SCOPOS_ORIGINS:-}
+      # Stop every Claude call once this month's estimated spend reaches this many dollars.
+      SCOPOS_MONTHLY_USD: ${SCOPOS_MONTHLY_USD:-5}
+      PORT: ${PORT:-4173}
+      # 1 = your reverse proxy is in front and its X-Forwarded-For is trusted (rate limits per real client).
+      SCOPOS_TRUST_PROXY: ${SCOPOS_TRUST_PROXY:-0}
+      # Optional: learn mode on a staging host (x-scopos-learn-token), extra Host names, model calls a day.
+      SCOPOS_LEARN_TOKEN: ${SCOPOS_LEARN_TOKEN:-}
+      SCOPOS_HOSTS: ${SCOPOS_HOSTS:-}
+      SCOPOS_DAILY_LIMIT: ${SCOPOS_DAILY_LIMIT:-2000}
+    ports:
+      # Only this machine (your nginx/caddy in front). To expose it directly: "${PORT:-4173}:${PORT:-4173}".
+      - "127.0.0.1:${PORT:-4173}:${PORT:-4173}"
+    volumes:
+      # knowledge.json (learned map and guides), answers.json (answer cache), usage.json (monthly spend)
+      - scopos-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  scopos-data:

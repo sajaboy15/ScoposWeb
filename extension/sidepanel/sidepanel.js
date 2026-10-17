@@ -434,27 +434,37 @@
   }
 
   // ---------- settings ----------
+  // apiKeySource 'server': the key came once from the local server's /setup («Передать ключ расширению»).
   async function renderKey() {
-    let apiKey = '';
-    try { apiKey = (await chrome.storage.local.get('apiKey')).apiKey || ''; } catch (e) { apiKey = ''; }
+    let s = {};
+    try { s = await chrome.storage.local.get(['apiKey', 'apiKeySource']); } catch (e) { s = {}; }
+    const apiKey = s.apiKey || '';
     $('#key').value = '';
     $('#key').placeholder = apiKey ? '••••••••' + apiKey.slice(-4) : 'sk-ant-…';
-    if (apiKey) { $('#key-state').innerHTML = '<span class="pill ok">Ключ: свой ключ</span><button class="btn ghost" id="key-del">Удалить ключ</button>'; return; }
+    if (apiKey) {
+      $('#key-state').innerHTML = `<span class="pill ok">${s.apiKeySource === 'server' ? 'Ключ: свой (получен с локального сервера)' : 'Ключ: свой ключ'}</span><button class="btn ghost" id="key-del">Убрать ключ из расширения</button>`;
+      return;
+    }
     $('#key-state').innerHTML = '<span class="faint">Проверяю локальный сервер…</span>';
     const k = await bg({ type: 'key:state', fresh: true });
     if (apiKey !== ((await chrome.storage.local.get('apiKey').catch(() => ({}))).apiKey || '')) return; // changed meanwhile
+    const server = String(k.devServer || 'http://localhost:4173');
     $('#key-state').innerHTML = k.mode === 'proxy'
-      ? `<span class="pill ok">Ключ: из локального сервера Scopos</span><span class="faint small">${esc(String(k.devServer || '').replace(/^https?:\/\//, ''))}</span>`
-      : '<span class="pill need">Нужен ключ</span>';
+      ? `<span class="pill ok">Ключ: из локального сервера Scopos</span><span class="faint small">${esc(server.replace(/^https?:\/\//, ''))}</span><p class="keyhint faint">Чтобы Scopos работал и без сервера, откройте <code>${esc(server)}/setup</code> и нажмите «Передать ключ расширению».</p>`
+      : `<span class="pill need">Нет ключа</span><p class="keyhint">Нет ключа. Откройте <code>${esc(server)}/setup</code> и нажмите «Передать ключ расширению», или вставьте ключ здесь.</p>`;
   }
   $('#key-save').addEventListener('click', async () => {
     const v = $('#key').value.trim();
     if (!/^sk-ant-/.test(v)) { flash('Ключ начинается с sk-ant-'); return; }
-    try { await chrome.storage.local.set({ apiKey: v }); flash('Ключ сохранён'); } catch (e) { flash('Не получилось сохранить ключ'); }
+    try { await chrome.storage.local.set({ apiKey: v }); await chrome.storage.local.remove(['apiKeySource', 'apiKeyAt']); flash('Ключ сохранён'); } catch (e) { flash('Не получилось сохранить ключ'); }
     renderKey();
   });
   $('#key').addEventListener('keydown', e => { if (e.key === 'Enter') $('#key-save').click(); });
-  $('#key-state').addEventListener('click', async e => { if (e.target.id === 'key-del') { await chrome.storage.local.remove('apiKey').catch(() => {}); renderKey(); } });
+  // Removing the key is final: a handed-off key comes back only after a new «Передать ключ» on /setup.
+  $('#key-state').addEventListener('click', async e => {
+    if (e.target.id === 'key-del') { await chrome.storage.local.remove(['apiKey', 'apiKeySource', 'apiKeyAt']).catch(() => {}); flash('Ключ убран из расширения'); renderKey(); }
+  });
+  chrome.storage.onChanged.addListener((changes, area) => { if (area === 'local' && (changes.apiKey || changes.apiKeySource) && view === 'set') renderKey(); });
 
   const money = c => '$' + (c > 0 && c < 0.01 ? c.toFixed(4) : c.toFixed(2));
   const dollars = n => '$' + (Number.isInteger(n) ? String(n) : n.toFixed(2));
@@ -511,4 +521,6 @@
   setView('ask');
   loadTab();
   q.focus();
+  // The panel opened: collect a key the user approved on the local server's /setup, if there is one.
+  bg({ type: 'key:handoff' }).then(r => { if (r && r.got) flash('Ключ получен с локального сервера'); });
 })();
