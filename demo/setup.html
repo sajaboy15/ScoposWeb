@@ -64,6 +64,7 @@ code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background
         <button class="btn main" type="submit">Сохранить</button>
       </form>
       <div class="state" id="key-state"></div>
+      <p class="note" id="budget" hidden></p>
     </div>
   </section>
 
@@ -98,9 +99,10 @@ code { font: 13px ui-monospace, "Cascadia Mono", Consolas, monospace; background
       </ol>
       <div class="path"><code id="ext-path">…</code><button class="btn" id="copy-path" type="button">Скопировать</button></div>
       <ol start="3" style="margin-top:12px">
-        <li>Нажмите на значок Scopos на панели Chrome (или <code>Alt+Shift+S</code>), откройте «Настройки» и вставьте тот же ключ.</li>
+        <li>Нажмите на значок Scopos на панели Chrome (или <code>Alt+Shift+S</code>). Ключ второй раз вставлять не нужно: пока этот сервер запущен, расширение спрашивает Claude через него.</li>
       </ol>
-      <p class="note">Chrome разрешает ставить расширения из папки только вручную, поэтому этот шаг за вами.</p>
+      <div class="state" id="ext-state" aria-live="polite"></div>
+      <p class="note">Chrome разрешает ставить расширения из папки только вручную, поэтому первый раз это делаете вы. Дальше новые версии ставятся сами: расширение раз в минуту сверяется с этой папкой и перезагружается, когда ничего не делает.</p>
     </div>
   </section>
 </div>
@@ -160,6 +162,31 @@ $('#key-state').addEventListener('click', async e => {
   if (id === 'del-no') { clearTimeout(delTimer); show(info); }
   if (id === 'del-yes') { clearTimeout(delTimer); info = { ...info, ...(await api('DELETE', {})) }; show(info); }
 });
+// Is the version on disk the one Chrome is running? core/update.js reports it every minute.
+const ago = iso => { const m = Math.round((Date.now() - Date.parse(iso)) / 60000); return m < 1 ? 'только что' : `${m} мин назад`; };
+async function extState() {
+  let st;
+  try { st = await fetch('/api/ext/status').then(r => r.json()); } catch (e) { return; }
+  if (!st || !st.disk) return;
+  const v = st.disk.version ? ` ${esc(st.disk.version)}` : '';
+  const quiet = st.loaded && Date.now() - Date.parse(st.loaded.seenAt) > 3 * 60000;
+  $('#s3').classList.toggle('done', !!st.upToDate);
+  $('#ext-state').innerHTML = !st.loaded
+    ? `<span class="pill need">Расширение ещё не подключалось</span><span>Первый раз: <code>chrome://extensions</code> → «Режим разработчика» → «Загрузить распакованное» → папка выше.</span>`
+    : st.upToDate
+      ? `<span class="pill ok">Расширение: загружена актуальная версия${v} ✓</span>${quiet ? `<span class="note">на связи ${esc(ago(st.loaded.seenAt))}</span>` : ''}`
+      : `<span class="pill need">В Chrome старая версия</span><span>${quiet ? `Расширение не отзывалось ${esc(ago(st.loaded.seenAt))}: обновится само, когда Chrome будет открыт.` : 'Она обновится сама через минуту.'}</span>`;
+}
+extState();
+setInterval(() => { if (!document.hidden) extState(); }, 10000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) extState(); });
+fetch('/api/scopos/stats').then(r => r.json()).then(s => {
+  if (!s.month || !s.month.cap) return;
+  const b = $('#budget');
+  b.hidden = false;
+  b.textContent = `В этом месяце потрачено около $${s.month.spent.toFixed(2)} из $${s.month.cap}. Дальше Claude отдыхает до 1-го числа, готовые гайды работают всегда.`;
+}).catch(() => {});
+
 $('#copy-path').addEventListener('click', () => {
   const t = $('#ext-path').textContent;
   try { navigator.clipboard.writeText(t).then(() => { $('#copy-path').textContent = 'Скопировано'; setTimeout(() => $('#copy-path').textContent = 'Скопировать', 1500); }); }

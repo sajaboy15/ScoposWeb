@@ -10,18 +10,25 @@ import vm from 'node:vm';
 const file = join(dirname(fileURLToPath(import.meta.url)), '..', 'extension', 'core', 'explore.js');
 
 // ---------------- a minimal fake DOM ----------------
+// tag[attr][attr=value]:not([attr=value]) … ; [attr*=x i] (substring, case-insensitive) too.
 function matchesOne(el, sel) {
-  const m = /^([a-z0-9-]*)((?:\[[^\]]+\])*)$/i.exec(sel.trim());
+  const nots = [];
+  const base = sel.trim().replace(/:not\((\[[^\]]+\])\)/g, (_, a) => { nots.push(a); return ''; });
+  const m = /^([a-z0-9-]*)((?:\[[^\]]+\])*)$/i.exec(base);
   if (!m) return false;
   if (m[1] && el.tagName !== m[1].toUpperCase()) return false;
-  for (const a of m[2].match(/\[[^\]]+\]/g) || []) {
-    const [, name, value] = /^\[([^=\]]+)(?:=["']?([^"'\]]*)["']?)?\]$/.exec(a);
-    if (!el.hasAttribute(name)) return false;
-    if (value !== undefined && el.getAttribute(name) !== value) return false;
-  }
+  const attrOk = a => {
+    const [, name, op, value] = /^\[([^=\]*~^$|]+)(\*?)(?:=["']?([^"'\]]*?)["']?(?: i)?)?\]$/.exec(a) || [];
+    if (!name || !el.hasAttribute(name)) return false;
+    if (value === undefined) return true;
+    return op === '*' ? el.getAttribute(name).toLowerCase().includes(value.toLowerCase()) : el.getAttribute(name) === value;
+  };
+  for (const a of m[2].match(/\[[^\]]+\]/g) || []) if (!attrOk(a)) return false;
+  for (const a of nots) if (attrOk(a)) return false;
   return true;
 }
-const matches = (el, sel) => sel.split(',').some(s => matchesOne(el, s));
+const matches = (el, sel) => splitSel(sel).some(s => matchesOne(el, s));
+const splitSel = sel => { const out = []; let depth = 0, cur = ''; for (const ch of sel) { if (ch === '(') depth++; if (ch === ')') depth--; if (ch === ',' && !depth) { out.push(cur); cur = ''; } else cur += ch; } out.push(cur); return out; };
 
 function makeDoc() {
   const doc = {
@@ -60,6 +67,10 @@ function el(tag, attrs = {}, children = [], doc = null) {
     get value() { return attrs.value || ''; },
     get form() { return e.closest('form'); },
     closest(sel) { for (let n = e; n; n = n.parentElement) if (matches(n, sel)) return n; return null; },
+    matches(sel) { return matches(e, sel); },
+    getBoundingClientRect: () => ({ left: 0, top: 0, right: 200, bottom: 40, width: 200, height: 40 }),
+    get previousElementSibling() { const p = e.parentElement; if (!p) return null; const i = p.children.indexOf(e); return i > 0 ? p.children[i - 1] : null; },
+    get childElementCount() { return e.children.length; },
     contains(o) { for (let n = o; n; n = n.parentElement) if (n === e) return true; return false; },
     querySelectorAll(sel) { const out = []; (function walk(x) { x.children.forEach(c => { if (matches(c, sel)) out.push(c); walk(c); }); })(e); return out; },
     querySelector(sel) { return e.querySelectorAll(sel)[0] || null; },
@@ -305,5 +316,212 @@ check("apostrophes join words (O'chirish → ochirish)", S._exploreTest.dnorm("O
 check('İptal folds to iptal', S._exploreTest.dnorm('İptal') === 'iptal');
 check('camelCase splits', S._exploreTest.dnorm('markAsPaid') === 'mark as paid');
 
-console.log(`\nexplore safety: ${passed} passed, ${failed} failed (corpus: ${corpusN} labels, ${BAD_URLS.length} refused addresses, ${GOOD_URLS.length} allowed)`);
+// ---------------- 10. form openers: only with writes blocked below the page; commits never ----------------
+const T = S._exploreTest;
+const pressKindOf = e => T.pressKind(e);
+const OPENERS = ['Пригласить коллегу', 'Invite user', 'Dispatch', 'Edit', 'Изменить', 'Сменить тариф', 'Редактировать', 'Переименовать',
+  'Настроить', 'Подключить интеграцию', 'Назначить водителя', 'Assign driver', 'Connect', 'Configure', 'Rename', 'Change password', '+',
+  'Einladen', 'Invitar miembro', 'Inviter un membre', '邀请成员', 'Zaproś', 'Davet et', 'Modifier'];
+const ALWAYS = ['New load', 'Add driver', 'Добавить клиента', 'Новый счёт', '+ New load']; // plain openers, pressable before too
+// 10a. the switch
+check('forms: vm (no extension runtime) is SDK mode: guard needed', T.setForms({}, false) === false && T.setForms({}, true) === true);
+check('forms: SDK, guard confirmed, forms:false → off', T.setForms({ sdk: true, forms: false }, true) === false);
+check('forms: SDK ignores netBlocked without the guard', T.setForms({ sdk: true, netBlocked: true }, false) === false);
+check('forms: extension needs netBlocked', T.setForms({ sdk: false }, true) === false && T.setForms({ sdk: false, netBlocked: true }, false) === true);
+check('forms: extension resume uses the value saved at start', T.setForms({ sdk: false }, false, true) === true && T.setForms({ sdk: false, netBlocked: false }, false, true) === false);
+check('forms: extension forms:false → off', T.setForms({ sdk: false, netBlocked: true, forms: false }) === false);
+// 10b. off: only the old allow-list
+T.setForms({ sdk: false, netBlocked: false });
+for (const t of OPENERS) check(`form opener NOT pressable without the net block: ${t}`, !S.explore.pressable(mk('button', { type: 'button' }, t)));
+check('form opener NOT pressable without the net block: ⋯ (no name)', !S.explore.pressable(mk('button', { type: 'button' }, '⋯')));
+for (const t of ALWAYS) check(`plain opener pressable without the net block: ${t}`, S.explore.pressable(mk('button', { type: 'button' }, t)));
+// 10c. on
+T.setForms({ sdk: false, netBlocked: true });
+for (const t of OPENERS) check(`form opener pressable with the net block: ${t}`, S.explore.pressable(mk('button', { type: 'button' }, t)), pressKindOf(mk('button', { type: 'button' }, t)));
+for (const t of ALWAYS) check(`plain opener pressable with the net block: ${t}`, S.explore.pressable(mk('button', { type: 'button' }, t)));
+check('⋯ (aria-label More actions) pressable', S.explore.pressable(mk('button', { type: 'button', 'aria-label': 'More actions' }, '⋯')));
+check('Ещё действия pressable', S.explore.pressable(mk('button', { type: 'button' }, 'Ещё действия')));
+check('<a href="#">Edit</a> pressable as a form opener', pressKindOf(mk('a', { href: '#' }, 'Edit')) === 'form');
+check('<a href="/loads/5/edit">Edit</a> is a link, not pressed', !S.explore.pressable(mk('a', { href: '/loads/5/edit' }, 'Edit')));
+check('id="invite" and @click="openInviteModal()" still an opener', S.explore.pressable(mk('button', { type: 'button', id: 'invite', '@click': 'openInviteModal()' }, 'Пригласить коллегу')));
+check('aria-haspopup=dialog «Пригласить коллегу» is a form opener', pressKindOf(mk('button', { type: 'button', 'aria-haspopup': 'dialog' }, 'Пригласить коллегу')) === 'form');
+check('a role=button div opener', S.explore.pressable(mk('div', { role: 'button', tabindex: '0' }, 'Invite user')));
+// commits and destructive verbs: never, even with the net block
+const NEVER = ['Send invite', 'Save driver', 'Сохранить', 'Отправить приглашение', 'Пригласить и отправить', 'Add to cart', 'Добавить в корзину',
+  'Submit', 'Pay', 'Pay now', 'Delete', 'Удалить', 'Publish', 'Log out', 'Approve', 'Archive', 'Cancel subscription', 'Transfer', 'Charge',
+  'Refund', 'Import', 'Upload', 'Sync', 'Confirm', 'Apply', 'Create & send', 'Edit and publish', 'Disconnect', 'Unassign', 'Reassign and notify',
+  'Add funds', 'Отключить', 'Подтвердить', 'Выставить счёт', 'Обновить тариф', 'Upgrade plan', 'Invite and send', 'Change and save'];
+for (const t of NEVER) check(`commit/destructive never pressed with the net block: ${t}`, !S.explore.pressable(mk('button', { type: 'button' }, t)), pressKindOf(mk('button', { type: 'button' }, t)));
+for (const t of NEVER) check(`commit/destructive never pressed as a menu trigger: ${t}`, !S.explore.pressable(mk('button', { type: 'button', 'aria-haspopup': 'dialog' }, t)));
+check('opener with id="send-invite" refused (send)', !S.explore.pressable(mk('button', { type: 'button', id: 'send-invite' }, 'Invite user')));
+check('opener with @click="sendInvite()" refused', !S.explore.pressable(mk('button', { type: 'button', '@click': 'sendInvite()' }, 'Invite user')));
+check('opener with hx-post refused', !S.explore.pressable(mk('button', { type: 'button', 'hx-post': '/team/invite' }, 'Invite user')));
+check('opener with class btn-danger refused', !S.explore.pressable(mk('button', { type: 'button', class: 'btn btn-danger' }, 'Edit')));
+check('opener with data-method=post refused', !S.explore.pressable(mk('a', { href: '#', 'data-method': 'post' }, 'Edit')));
+// context: inside a dialog or next to fields it is a commit
+function dlgWith(btnAttrs, text, fields = true) {
+  const kids = fields ? [el('input', { type: 'text', name: 'name' }, '', doc)] : [];
+  const b = el('button', { type: 'button', ...btnAttrs }, text, doc);
+  const d = el('div', { role: 'dialog' }, kids.concat([el('div', { class: 'footer' }, [b], doc)]), doc);
+  d.parentElement = doc.body;
+  return b;
+}
+function formWith(btnAttrs, text, { fields = true } = {}) {
+  const kids = fields ? [el('input', { type: 'text', name: 'title' }, '', doc), el('select', { name: 'driver' }, '', doc)] : [];
+  const b = el('button', btnAttrs, text, doc);
+  const f = el('form', {}, kids.concat([el('div', {}, [b], doc)]), doc);
+  f.parentElement = doc.body;
+  return b;
+}
+function boxWith(btnAttrs, text) { // a React form: no <form>, fields in the same card
+  const b = el('button', { type: 'button', ...btnAttrs }, text, doc);
+  const card = el('div', { class: 'card' }, [el('input', { type: 'text', name: 'mc' }, '', doc), el('div', { class: 'actions' }, [b], doc)], doc);
+  card.parentElement = doc.body;
+  return b;
+}
+check('"Create load" in a dialog footer: not pressable', !S.explore.pressable(dlgWith({}, 'Create load')));
+check('"Dispatch load" in a dialog footer: not pressable', !S.explore.pressable(dlgWith({}, 'Dispatch load')));
+check('"Invite user" inside a dialog: not pressable', !S.explore.pressable(dlgWith({}, 'Invite user', false)));
+check('"Create load" type=button in a form with fields: not pressable', !S.explore.pressable(formWith({ type: 'button' }, 'Create load')));
+check('"Invite user" type=submit in a form: not pressable', !S.explore.pressable(formWith({ type: 'submit' }, 'Invite user', { fields: false })));
+check('"Create load" next to fields (no <form>): not pressable', !S.explore.pressable(boxWith({}, 'Create load')));
+check('"Edit" next to a search box only: pressable', (() => {
+  const b = el('button', { type: 'button' }, 'Edit', doc);
+  const bar = el('div', {}, [el('input', { type: 'search', name: 'q' }, '', doc), b], doc); bar.parentElement = doc.body;
+  return S.explore.pressable(b);
+})());
+// pagination and load more: never
+for (const t of ['Next', 'Previous', '2', 'Показать ещё', 'Load more', 'Show more', 'Далее', '»'])
+  check(`pager never pressed: ${t}`, !S.explore.pressable(mk('button', { type: 'button' }, t)));
+check('a record chip "↳ #1042" that opens a dialog is not a pager', S.explore.pressable(mk('button', { type: 'button', 'aria-haspopup': 'dialog', class: 'chip' }, '↳ #1042')));
+// the corpus stays refused with the net block, except labels that start with an opener verb by design
+const FORM_BY_DESIGN = new Set(['Пригласить', 'Пригласить?', 'Пригласить коллегу', 'Назначить', 'Сменить тариф', 'Invite', 'Assign', 'Einladen']);
+let corpusForms = 0;
+for (const [lang, labels] of Object.entries(CORPUS)) for (const label of labels) {
+  const plain = S.explore.pressable(mk('button', { type: 'button' }, label));
+  const menu = S.explore.pressable(mk('button', { type: 'button', 'aria-haspopup': 'menu' }, label));
+  if (FORM_BY_DESIGN.has(label)) { corpusForms++; check(`corpus label is a form opener by design [${lang}] ${label}`, plain && menu); }
+  else check(`corpus still refused with the net block [${lang}] ${label}`, !plain && !menu, { plain, menu });
+}
+// 10c'. dialog verbs: "Upload document", "Log fuel purchase", "Schedule service" open a dialog to record something.
+// Page-level, with an object after the verb, and only with the net block; the bare verb and anything in a dialog
+// or form stays a commit; "Log" is never "Log out / off / in".
+{
+  const DIALOG_OPENERS = ['Upload document', 'Log fuel purchase', 'Schedule service', 'Upload a file', 'Log expense', 'Log payment'];
+  T.setForms({ sdk: false, netBlocked: false });
+  for (const t of DIALOG_OPENERS) check(`dialog opener NOT pressable without the net block: ${t}`, !S.explore.pressable(mk('button', { type: 'button' }, t)));
+  for (const t of DIALOG_OPENERS) check(`dialog opener is opener-like (unexplored until opened): ${t}`, T.openerLike(mk('button', { type: 'button' }, t)));
+  T.setForms({ sdk: false, netBlocked: true });
+  for (const t of DIALOG_OPENERS) check(`dialog opener pressable with the net block: ${t}`, pressKindOf(mk('button', { type: 'button' }, t)) === 'form', pressKindOf(mk('button', { type: 'button' }, t)));
+  check('dialog opener with data-act="new-fuel" (fuel purchase) pressable', pressKindOf(mk('button', { type: 'button', 'data-act': 'new-fuel' }, 'Log fuel purchase')) === 'form');
+  check('dialog opener with aria-haspopup=dialog pressable', S.explore.pressable(mk('button', { type: 'button', 'aria-haspopup': 'dialog' }, 'Upload document')));
+  const SESSION = ['Log out', 'Log off', 'Log in', 'Log on', 'Logout', 'Log out of all devices', 'Log in with Google', 'Log into account'];
+  for (const t of SESSION) {
+    check(`"${t}" never a form opener`, T.formVerb(t) === null && !T.openerLike(mk('button', { type: 'button' }, t)));
+    check(`"${t}" never pressed with the net block`, !S.explore.pressable(mk('button', { type: 'button' }, t)));
+    // "Log out" / "Log off" are refused even as a menu trigger (a "Log in" menu trigger only opens its menu, as before).
+    if (/out|off/i.test(t)) check(`"${t}" never pressed as a menu trigger`, !S.explore.pressable(mk('button', { type: 'button', 'aria-haspopup': 'menu' }, t)));
+  }
+  check('"Log in" in a login form is still a commit', T.commitOf(formWith({ type: 'button' }, 'Log in')));
+  for (const t of ['Upload', 'Schedule', 'Log']) {
+    check(`bare "${t}" is no opener`, T.formVerb(t) === null && !S.explore.pressable(mk('button', { type: 'button' }, t)));
+    check(`bare "${t}" in a dialog is its commit`, T.commitOf(dlgWith({}, t)) && !S.explore.pressable(dlgWith({}, t)));
+  }
+  check('"Upload" submit in the upload dialog form is a commit', T.commitOf(formWith({ type: 'submit' }, 'Upload')) && !S.explore.pressable(formWith({ type: 'submit' }, 'Upload')));
+  check('"Schedule service" submit in its dialog is a commit', T.commitOf(dlgWith({ type: 'submit' }, 'Schedule service')) && !S.explore.pressable(dlgWith({}, 'Schedule service')));
+  check('"Save purchase" in the fuel dialog is a commit', T.commitOf(dlgWith({}, 'Save purchase')) && !S.explore.pressable(dlgWith({}, 'Save purchase')));
+  check('"Schedule service" type=button next to fields is a commit', T.commitOf(boxWith({}, 'Schedule service')) && !S.explore.pressable(boxWith({}, 'Schedule service')));
+  check('"Upload document" inside a dialog: not pressable', !S.explore.pressable(dlgWith({}, 'Upload document')));
+  for (const t of ['Upload and send', 'Upload and publish', 'Log payment and send receipt', 'Schedule and notify driver', 'Log purchase and pay', 'Upload & delete'])
+    check(`dialog verb with a write after it refused: ${t}`, !S.explore.pressable(mk('button', { type: 'button' }, t)), pressKindOf(mk('button', { type: 'button' }, t)));
+  check('dialog opener with hx-post refused', !S.explore.pressable(mk('button', { type: 'button', 'hx-post': '/documents' }, 'Upload document')));
+  check('dialog opener with @click="uploadNow()" ... still the opener verb only: refused for "submit"', !S.explore.pressable(mk('button', { type: 'button', '@click': 'submitUpload()' }, 'Upload document')));
+  T.setForms({ sdk: false, netBlocked: false });
+}
+// 10d. commit and opener annotations (pure DOM)
+check('commitOf: submit in a form', T.commitOf(formWith({ type: 'submit' }, 'Сохранить клиента')));
+check('commitOf: default <button> in a form', T.commitOf(formWith({}, 'Отправить приглашение')));
+check('commitOf: Отмена in a form is not a commit', !T.commitOf(formWith({ value: 'cancel' }, 'Отмена')));
+check('commitOf: «Добавить» in a dialog footer', T.commitOf(dlgWith({}, 'Добавить')));
+check('commitOf: "Delete" in a confirm dialog without fields', T.commitOf(dlgWith({}, 'Delete', false)));
+check('commitOf: primary button in a dialog', T.commitOf(dlgWith({ class: 'btn btn-primary' }, 'Готово!')));
+check('commitOf: "Save" next to fields (no <form>)', T.commitOf(boxWith({}, 'Save')));
+check('commitOf: "Add line" type=button inside a form is not a commit', !T.commitOf(formWith({ type: 'button' }, 'Add line')));
+check('commitOf: "+ Add line" next to fields (no <form>) is not a commit', !T.commitOf(boxWith({}, '+ Add line')));
+check('commitOf: "Create load" next to fields (no <form>) is a commit', T.commitOf(boxWith({}, 'Create load')));
+check('commitOf: "Clear filters" next to filter fields is not a commit', !T.commitOf(boxWith({}, 'Clear filters')));
+check('commitOf: page-level «Новый счёт» is not a commit', !T.commitOf(mk('button', { type: 'button' }, 'Новый счёт')));
+check('commitOf: a dialog trigger is not a commit', !T.commitOf(mk('button', { type: 'button', 'aria-haspopup': 'dialog' }, 'Пригласить коллегу')));
+check('openerLike: «Пригласить коллегу»', T.openerLike(mk('button', { type: 'button' }, 'Пригласить коллегу')));
+check('openerLike: aria-haspopup=dialog', T.openerLike(mk('button', { type: 'button', 'aria-haspopup': 'dialog' }, 'Команда')));
+check('openerLike: «Отчёты» is not', !T.openerLike(mk('button', { type: 'button' }, 'Отчёты')));
+check('formVerb: "+10%" is a number, not an opener', T.formVerb('+10%') === null && T.formVerb('+ 10') === null && T.formVerb('+') === 'make');
+check('formVerb', T.formVerb('Send invite') === null && T.formVerb('+ New') === 'make' && T.formVerb('Подробнее') === 'nav' && T.formVerb('Invite user') === 'make' && T.formVerb('新建运单') === 'make');
+check('maskForm keeps the rest', T.maskForm('Пригласить коллегу') === 'коллегу' && T.maskForm('Send invite') === 'send', [T.maskForm('Пригласить коллегу'), T.maskForm('Send invite')]);
+// 10e. form pages at their own address
+T.setForms({ sdk: false, netBlocked: true });
+for (const u of ['/drivers/add', '/team/invite', '/loads/create', '/#/clients/add', '/loads/new'])
+  check(`form route allowed with forms on: ${u}`, !T.unsafeAddress(u));
+for (const u of ['/cart/add?id=5', '/wishlist/add/5', '/items/5/delete/add', '/invites/5/accept', '/tickets/5/close', '/logout', '/loads/add?copy=5'])
+  check(`still refused with forms on: ${u}`, T.unsafeAddress(u));
+T.setForms({ sdk: false, netBlocked: false });
+check('form route refused with forms off: /drivers/add', T.unsafeAddress('/drivers/add'));
+// 10f. map annotations
+{
+  const st0 = {
+    origin: 'https://app.example.com', status: 'done', probes: 3,
+    views: {
+      '/clients': { id: 'V1', key: '/clients', url: 'u', kind: 'page', title: 'Клиенты', headings: [], captured: true, controls: [
+        { ref: 'V1.1', role: 'button', name: 'Добавить клиента', ol: 1, probe: 'pressed', to: '/clients › Новый клиент' },
+        { ref: 'V1.2', role: 'button', name: 'Импорт', ol: undefined, probe: 'skip' },
+        { ref: 'V1.3', role: 'button', name: 'Пригласить', ol: 1, probe: 'skip' },
+        { ref: 'V1.4', role: 'button', name: 'Изменить', ol: 1, probe: 'nothing' },
+        { ref: 'V1.5', role: 'table', name: 'Клиенты', probe: 'skip', rg: 1, d: { sel: ['table'] } },
+      ] },
+      '/clients › Новый клиент': { id: 'V2', key: '/clients › Новый клиент', url: 'u', kind: 'dialog', parent: '/clients', opener: 'V1.1', title: 'Новый клиент', headings: [], captured: true, controls: [
+        { ref: 'V2.1', role: 'textbox', name: 'Название', probe: 'skip' },
+        { ref: 'V2.2', role: 'button', name: 'Сохранить клиента', commit: true, probe: 'skip' },
+        { ref: 'V2.3', role: 'button', name: 'Отмена', probe: 'skip' },
+      ] },
+    },
+  };
+  const m = T.toMap(st0);
+  const c = r => m.views.flatMap(v => v.controls).find(x => x.ref === r);
+  check('map: opened opener has to and no unexplored', c('V1.1').to === 'V2' && !c('V1.1').unexplored);
+  check('map: unpressed opener is unexplored', c('V1.3').unexplored === true);
+  check('map: opener pressed with nothing visible is explored', !c('V1.4').unexplored);
+  check('map: commit flag', c('V2.2').commit === true && !c('V2.3').commit);
+  check('map: dialog with fields and a commit is a form', m.views[1].form === true && !m.views[0].form);
+  check('map: region control kept with its descriptor', c('V1.5').role === 'table' && c('V1.5').d && c('V1.5').d.view === 'Клиенты');
+  check('map: no internal flags leak', !('ol' in c('V1.3')) && !('probe' in c('V1.3')) && !('rg' in c('V1.5')));
+}
+// 10g. row controls: one representative per table place and label pattern, with row: true and the generic label
+{
+  const ro = { box: { tag: 'table', name: 'loads', head: ['load #', 'actions'] }, row: 'tr', col: 1, hcol: 'actions', nth: 0, role: 'button', pre: 'actions for load', suf: '', label: 'Actions for load …' };
+  const rk = 'button|tr|loads|load #,actions|1|0|actions for load||0';
+  const rowCtl = (i, id, extra) => ({ ref: `V1.${i}`, role: 'button', name: `Actions for load ${id}`, rk, tw: rk, rowLabel: ro.label, d: { sel: [], fp: { rowOf: ro } }, ...extra });
+  const st0 = {
+    origin: 'https://app.example.com', status: 'done', probes: 1,
+    views: {
+      '/loads': { id: 'V1', key: '/loads', url: 'u', kind: 'page', title: 'Loads', headings: [], captured: true, controls: [
+        { ref: 'V1.1', role: 'link', name: 'Loads', probe: 'link' },
+        rowCtl(2, 1066, { probe: 'twin' }), rowCtl(3, 1065, { probe: 'pressed', to: '/loads › Actions for load …', ol: 1 }), rowCtl(4, 1064, {}),
+        { ref: 'V1.5', role: 'table', name: 'Loads', probe: 'skip', rg: 1, d: { sel: ['table'] } },
+      ] },
+      '/loads › Actions for load …': { id: 'V2', key: '/loads › Actions for load …', url: 'u', kind: 'panel', parent: '/loads', opener: 'V1.3', title: 'Actions for load …', headings: [], captured: true, controls: [
+        { ref: 'V2.1', role: 'menuitem', name: 'Edit', probe: 'skip' },
+      ] },
+    },
+  };
+  const m = T.toMap(st0);
+  const rows = m.views[0].controls.filter(c => c.row);
+  check('map: a row control is listed once per view', rows.length === 1 && m.views[0].controls.length === 3, m.views[0].controls.map(c => c.ref));
+  check('map: the representative is the pressed one, with where it led', rows[0] && rows[0].ref === 'V1.3' && rows[0].to === 'V2' && !rows[0].unexplored);
+  check('map: row control has row: true and the generic label', rows[0] && rows[0].row === true && rows[0].rowLabel === 'Actions for load …' && rows[0].d.fp.rowOf.pre === 'actions for load');
+  check('map: plain controls carry no row flag', !m.views[0].controls[0].row && !('rowLabel' in m.views[0].controls[0] && m.views[0].controls[0].rowLabel !== undefined));
+  check('map: no internal row key leaks', !('rk' in rows[0]) && !('tw' in rows[0]));
+}
+T.setForms({ sdk: false, netBlocked: false });
+
+console.log(`\nexplore safety: ${passed} passed, ${failed} failed (corpus: ${corpusN} labels, ${corpusForms} of them form openers by design; ${BAD_URLS.length} refused addresses, ${GOOD_URLS.length} allowed)`);
 process.exit(failed ? 1 : 0);

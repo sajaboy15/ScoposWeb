@@ -167,6 +167,34 @@
     if (ia && ia !== ids(b)) return 0;
     return simN(normText(a), normText(b)) || 0;
   }
+  /**
+   * The generic label of a control repeated once per row, from its labels in several rows (labels[0] is the
+   * control's own). Words every label shares at the start and at the end stay, the rest is record data:
+   * "Actions for load 1066" / "… 1065" → "Actions for load …"; "Edit Marcus Reed" / "Edit Ana Lopez" → "Edit …".
+   * Same label in every row ("Dispatch", "⋯"): same, label as is. Nothing shared ("1066" / "1065", company names),
+   * or a link whose shared words are fewer than its varying ones: data (the caller names it by its column).
+   * pre / suf: the shared parts normalized, for labelFits(). Pure.
+   */
+  function rowPattern(labels, role) {
+    const ws = labels.map(l => clean(l).split(' ').filter(Boolean));
+    const k = w => normText(w, true);
+    if (labels.every(l => normText(l, true) === normText(labels[0], true))) return { label: cut(clean(labels[0]), 70), pre: normText(labels[0]), suf: '', same: true };
+    const min = Math.min(...ws.map(w => w.length));
+    let pre = 0, suf = 0;
+    while (pre < min && ws.every(w => k(w[pre]) === k(ws[0][pre]))) pre++;
+    while (suf < min - pre && ws.every(w => k(w[w.length - 1 - suf]) === k(ws[0][ws[0].length - 1 - suf]))) suf++;
+    const own = ws[0], varying = own.length - pre - suf;
+    if ((!pre && !suf) || (role === 'link' && pre + suf < varying)) return { label: '', pre: '', suf: '', data: true };
+    const P = own.slice(0, pre).join(' '), Q = own.slice(own.length - suf).join(' ');
+    return { label: cut([P, '…', Q].filter(Boolean).join(' '), 70), pre: normText(P), suf: normText(Q) };
+  }
+  /** Does a label fit a row pattern (rowPattern's pre / suf, or a data column: any label)? Pure. */
+  function labelFits(ro, name) {
+    if (!ro || ro.data) return true;
+    const n = normText(name);
+    if (ro.same) return n === ro.pre;
+    return (!ro.pre || n === ro.pre || n.startsWith(ro.pre + ' ')) && (!ro.suf || n === ro.suf || n.endsWith(' ' + ro.suf));
+  }
   const twinSim = (a, b) => (a.index === b.index ? 1 : a.count - a.index === b.count - b.index ? 0.5 : 0);
   const nameSim = (fp, c) => simN(fp.name, fp.trunc ? (c.name || '').slice(0, fp.name.length + 2) : c.name);
 
@@ -310,7 +338,7 @@
   };
 
   S.pathKey = pathKey;
-  S._test = { normText, textSim, simN, scoreFeatures, lev, levRatio, redact, stableId, stableClass, fpOf, rowSim, identityOK, accepts, pathKey };
+  S._test = { normText, textSim, simN, scoreFeatures, lev, levRatio, redact, stableId, stableClass, fpOf, rowSim, identityOK, accepts, pathKey, rowPattern, labelFits };
   S.normText = normText;
 
   if (!hasDOM) return;
@@ -567,6 +595,9 @@
       case 'BUTTON': case 'SUMMARY': case 'DETAILS': return 'button';
       case 'SELECT': return 'select';
       case 'TEXTAREA': return 'textbox';
+      // Regions the explorer names in the map ("look at the list" steps point at them).
+      case 'TABLE': return 'table';
+      case 'UL': case 'OL': return 'list';
       case 'INPUT': {
         const type = (el.getAttribute('type') || 'text').toLowerCase();
         return { checkbox: 'checkbox', radio: 'radio', submit: 'button', button: 'button', reset: 'button', image: 'button', range: 'slider', file: 'file', number: 'spinbutton', search: 'searchbox' }[type]
@@ -736,7 +767,10 @@
       if (type === 'image') { const t = clean(el.getAttribute('alt')); if (t) return t; }
     }
     if (tag === 'IMG' || tag === 'AREA') { const t = clean(el.getAttribute('alt')); if (t) return t; }
-    if (!textboxLike(el) && tag !== 'SELECT' && !NO_CONTENT.test(explicitRole(el))) {
+    if (tag === 'TABLE' && el.caption) { const t = clean(el.caption.textContent); if (t) return t; }
+    // A table or a list is named by its caption or label, never by all the rows in it.
+    const ownRole = explicitRole(el) || (tag === 'TABLE' ? 'table' : tag === 'UL' || tag === 'OL' ? 'list' : '');
+    if (!textboxLike(el) && tag !== 'SELECT' && !NO_CONTENT.test(ownRole)) {
       const t = clean(contentText(el));
       if (t) return t;
       const img = el.querySelector('img[alt],svg[aria-label],[role=img][aria-label],svg title');
@@ -804,13 +838,15 @@
 
   const headingText = h => normText(redact((h.textContent || '').slice(0, 200))).slice(0, 80);
   // Nearest heading before the control in reading order: previous siblings, then up the tree.
-  function headingBefore(el) {
+  // raw: its text as shown (redacted, not normalized).
+  function headingBefore(el, raw) {
+    const out = h => (raw ? cut(redact(clean((h.textContent || '').slice(0, 200))), 60) : headingText(h));
     let n = el;
     for (let up = 0; n && up < 8; up++) {
       let k = 0;
       for (let s = n.previousElementSibling; s && k < 25; s = s.previousElementSibling, k++) {
-        if (s.matches(HEADING)) return headingText(s);
-        if (s.childElementCount) { const hs = s.querySelectorAll(HEADING); if (hs.length) return headingText(hs[hs.length - 1]); }
+        if (s.matches(HEADING)) return out(s);
+        if (s.childElementCount) { const hs = s.querySelectorAll(HEADING); if (hs.length) return out(hs[hs.length - 1]); }
       }
       n = parentOf(n, false);
       if (!n || n.tagName === 'BODY') break;
@@ -865,6 +901,209 @@
     if (own) text = text.replace(own, ' ');
     const key = normText(redactEmails(text), true).slice(0, 80);
     return key ? { key, index } : null;
+  }
+
+  // ---------- row controls: one per row of a data table or list ----------
+  // "Actions for load 1066", "Edit Marcus Reed", a record link "1066": the same role at the same place in every
+  // row, with a label that differs only by record data. A guide step on one means "this, on the record you need":
+  // its descriptor carries fp.rowOf (rowInfo), resolveRow() finds it in ANY row of the same table, and matchRow()
+  // tells whether a control the user clicked is one. The sample record the explorer saw is never required.
+  const ROW_BOX = 'table,[role=table],[role=grid],[role=treegrid],ul,ol,[role=list],[role=feed]';
+  // Navigation, menus, tabs and pagers are lists too, but not of records.
+  const ROW_SKIP = 'nav,[role=navigation],[role=menubar],[role=menu],[role=listbox],[role=tablist],[role=tree],[role=toolbar],[role=banner],[aria-label*=breadcrumb i],[class*=pagination i],[class*=pager i]';
+  const ROW_CTL = NATIVE + ',' + ROLES + ',[onclick],[tabindex]:not([tabindex="-1"])';
+  const isCell = c => /^(TD|TH)$/.test(c.tagName) || /^(cell|gridcell|columnheader|rowheader)$/.test(explicitRole(c));
+  const cellsOf = row => [...row.children].filter(isCell);
+  const tableRow = row => row.tagName === 'TR' || explicitRole(row) === 'row';
+  const rowSig = row => row.tagName.toLowerCase() + (explicitRole(row) ? '@' + explicitRole(row) : '');
+  function headerRow(row) {
+    if (row.closest('thead')) return true;
+    const cs = cellsOf(row);
+    return cs.length > 0 && cs.every(c => (c.tagName === 'TH' && c.getAttribute('scope') !== 'row') || explicitRole(c) === 'columnheader');
+  }
+  function rowBoxOf(row) { const p = row.parentElement; return (p && closestDeep(p, ROW_BOX)) || p; }
+  function rowsIn(box, sig) {
+    const out = [];
+    for (const r of box.querySelectorAll(ROW)) if (rowSig(r) === sig && !headerRow(r) && rowBoxOf(r) === box) out.push(r);
+    return out;
+  }
+  // Controls of one role in a cell or a row, outermost only (the <b> in a link is the link), in document order.
+  function ctlsIn(scope, role) {
+    const all = [...scope.querySelectorAll(ROW_CTL)].filter(x => !(flags(x) & BAD));
+    const set = new Set(all);
+    return all.filter(x => {
+      if (!/^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(x.tagName)) for (let p = x.parentElement; p && p !== scope; p = p.parentElement) if (set.has(p)) return false;
+      return roleOf(x) === role;
+    });
+  }
+  /** Where a control sits in its data row: { row, box, col (cell index, -1 in a list), nth (among its role there), role, sig }. */
+  function rowPlace(el) {
+    const p = parentOf(el, false);
+    const row = p && closestDeep(p, ROW);
+    if (!row || !row.parentElement || headerRow(row) || closestDeep(row, ROW_SKIP)) return null;
+    const box = rowBoxOf(row);
+    if (!box || box === document.body) return null;
+    let scope = row, col = -1;
+    if (tableRow(row)) {
+      const cs = cellsOf(row);
+      const i = cs.findIndex(c => c === el || c.contains(el));
+      if (i >= 0) { scope = cs[i]; col = i; }
+    }
+    const role = roleOf(el);
+    const nth = ctlsIn(scope, role).indexOf(el);
+    return nth < 0 ? null : { row, box, col, nth, role, sig: rowSig(row) };
+  }
+  const boxHeads = box => { // header cells of a table or grid, as shown (redacted)
+    const hr = [...box.querySelectorAll('tr,[role=row]')].find(r => headerRow(r) && rowBoxOf(r) === box);
+    return hr ? cellsOf(hr).map(c => cut(redact(clean(c.textContent || '')), 40)) : [];
+  };
+  function boxName(box) {
+    if (box.tagName === 'TABLE' && box.caption) { const t = clean(box.caption.textContent); if (t) return cut(redact(t), 60); }
+    const n = byIds(box, 'aria-labelledby') || clean(box.getAttribute('aria-label'));
+    return n ? cut(redact(n), 60) : headingBefore(box, true);
+  }
+  const rowText = row => clean((row.children.length ? [...row.children].map(nodeText).join(' ') : nodeText(row)).slice(0, 400));
+  const ROW_SAMPLE = 40;
+  /**
+   * fp.rowOf for a control repeated per row, or null: { box: { tag, role, name, head, id, testid }, row, col, hcol,
+   * nth, role, pre, suf, same?, data?, label }. label: the generic label shown in the map ("Actions for load …",
+   * "Edit …"; a data column's header such as "Load #", else the table's name). Cached per table and place per task.
+   */
+  function rowInfo(el) {
+    const pl = rowPlace(el);
+    if (!pl) return null;
+    const t = tick();
+    if (!t.rowg) t.rowg = new Map();
+    let byBox = t.rowg.get(pl.box);
+    if (!byBox) t.rowg.set(pl.box, (byBox = new Map()));
+    const gk = `${pl.sig}|${pl.col}|${pl.nth}|${pl.role}`;
+    let g = byBox.get(gk);
+    if (g === undefined) {
+      g = null;
+      const labels = [];
+      let others = 0, extra = false;
+      for (const r of rowsIn(pl.box, pl.sig).slice(0, ROW_SAMPLE)) {
+        const scope = pl.col >= 0 ? cellsOf(r)[pl.col] : r;
+        const x = scope && ctlsIn(scope, pl.role)[pl.nth];
+        if (!x) continue;
+        const name = redact(nameOf(x));
+        if (r === pl.row) labels.unshift(name); else { labels.push(name); others++; }
+        if (!extra && rowText(r).length > clean(name).length + 3) extra = true; // the row holds more than this control
+      }
+      if (others && labels.length >= 2) {
+        const pat = rowPattern(labels.slice(0, 1 + others), pl.role);
+        // A list whose rows are nothing but differently named links is a menu of screens, not of records.
+        if (!(pat.data && !tableRow(pl.row) && !extra)) {
+          const heads = boxHeads(pl.box), name = boxName(pl.box) || '';
+          const tid = testIdOf(pl.box);
+          // Record data under a header that is data too (a board's day columns: "Sat Oct 17"): any such column.
+          const anyCol = !!(pat.data && pl.col >= 0 && /\d/.test(heads[pl.col] || ''));
+          g = {
+            box: { tag: pl.box.tagName.toLowerCase(), role: explicitRole(pl.box) || undefined, name: normText(name).slice(0, 60) || undefined,
+              head: heads.length ? heads.slice(0, 16).map(h => normText(h).slice(0, 40)) : undefined,
+              id: pl.box.id && stableId(pl.box.id) ? pl.box.id : undefined, testid: tid || undefined },
+            row: pl.sig, col: anyCol ? -2 : pl.col, hcol: !anyCol && pl.col >= 0 && heads[pl.col] ? normText(heads[pl.col]).slice(0, 40) : undefined,
+            nth: anyCol ? -1 : pl.nth, role: pl.role, pre: pat.pre, suf: pat.suf, same: pat.same || undefined, data: pat.data || undefined,
+            label: pat.data ? (!anyCol && pl.col >= 0 && heads[pl.col]) || name || 'row' : pat.label || (pl.role === 'link' ? 'link' : 'button'),
+          };
+        }
+      }
+      byBox.set(gk, g);
+    }
+    return g ? JSON.parse(JSON.stringify(g)) : null; // a copy: callers keep it in descriptors
+  }
+
+  // ---------- finding a row control again, in any row ----------
+  function boxScore(ro, box) {
+    let num = 0, den = 0;
+    const add = (w, s) => { if (s === null || s === undefined) return; num += w * s; den += w; };
+    const b = ro.box || {};
+    add(2, b.head && b.head.length ? jaccard(b.head.filter(Boolean), boxHeads(box).map(h => normText(h)).filter(Boolean)) || 0 : null);
+    add(1.5, b.name ? simN(b.name, normText(boxName(box))) || 0 : null);
+    add(0.5, b.tag ? (b.tag === box.tagName.toLowerCase() ? 1 : 0) : null);
+    add(2, b.id ? (box.id === b.id ? 1 : 0) : null);
+    add(2, b.testid ? (testIdOf(box) === b.testid ? 1 : 0) : null);
+    return den ? num / den : 0;
+  }
+  /** Tables or lists on the page that are the one a row descriptor was made in, best first. Cached per task. */
+  function boxesFor(ro) {
+    const t = tick();
+    if (!t.boxes) t.boxes = new Map();
+    const memo = JSON.stringify([ro.box, ro.row]);
+    if (t.boxes.has(memo)) return t.boxes.get(memo);
+    const modal = topModal();
+    let cands = deepQueryAll(ROW_BOX).filter(b => !(flags(b) & BAD) && (!modal || containsDeep(modal, b)) && !closestDeep(b, ROW_SKIP) && isVisible(b) && rowsIn(b, ro.row).length);
+    let out = cands.map(b => ({ b, s: boxScore(ro, b) })).filter(x => x.s >= 0.6).sort((x, y) => y.s - x.s).map(x => x.b);
+    if (!out.length && cands.length === 1 && !(ro.box && ro.box.head && ro.box.head.length)) out = cands; // the only list on the page
+    t.boxes.set(memo, out);
+    return out;
+  }
+  // The column in this table: by its header when the columns moved, else by position.
+  function colIn(ro, box) {
+    if (ro.col < 0) return -1;
+    if (ro.hcol) { const i = boxHeads(box).map(h => normText(h)).indexOf(ro.hcol); if (i >= 0) return i; }
+    return ro.col;
+  }
+  // The row control in one row: at its place (same cell, same rank among its role) with a fitting label; else
+  // the only fitting one of its role in the cell or the row. A data column (any label) is taken by place only.
+  function pickInRow(ro, row, col) {
+    const fits = x => labelFits(ro, nameOf(x));
+    const scope = col >= 0 ? cellsOf(row)[col] : row;
+    if (scope) {
+      const list = ctlsIn(scope, ro.role), x = list[ro.nth];
+      if (x && fits(x)) return x;
+      if (!ro.data) { const f = list.filter(fits); if (f.length === 1) return f[0]; }
+    }
+    if (!ro.data && scope !== row) { const f = ctlsIn(row, ro.role).filter(fits); if (f.length === 1) return f[0]; }
+    return null;
+  }
+  // Every match in one row: an any-column descriptor (col -2) takes its role in every cell under a data header.
+  function rowCands(ro, row, box, col) {
+    if (ro.col !== -2) { const x = pickInRow(ro, row, col); return x ? [x] : []; }
+    const heads = boxHeads(box), out = [];
+    cellsOf(row).forEach((c, i) => { if (!heads.length || /\d/.test(heads[i] || '')) out.push(...ctlsIn(c, ro.role)); });
+    return out;
+  }
+  const rowOfDesc = d => (d && d.fp && d.fp.rowOf) || (d && d.rowOf) || null;
+  /** The data row around a node, for "the row the user picked": { row, key } or null. */
+  function rowAt(node) {
+    const n = node && node.nodeType === 1 ? node : node && node.parentElement;
+    const row = n && closestDeep(n, ROW);
+    if (!row || headerRow(row) || closestDeep(row, ROW_SKIP) || isOurs(row)) return null;
+    return { row, key: normText(redactEmails(rowText(row)), true).slice(0, 80) };
+  }
+  /**
+   * Every visible match of a row descriptor, in page order, from the best-matching table that has any: { el, els }.
+   * el: the one to point at: in the row opts.prefer names ({ row } still on the page, or its { key }), else the first
+   * in the viewport, else the first.
+   */
+  function resolveRow(d, opts) {
+    const ro = rowOfDesc(d);
+    if (!ro) return { el: null, els: [] };
+    const els = [];
+    for (const box of boxesFor(ro)) {
+      const col = colIn(ro, box);
+      for (const r of rowsIn(box, ro.row)) {
+        for (const x of rowCands(ro, r, box, col)) if (!(flags(x) & BAD) && isVisible(x) && styleOf(x).pointerEvents !== 'none') els.push(x);
+      }
+      if (els.length) break;
+    }
+    const pref = opts && opts.prefer;
+    let el = null;
+    if (pref && pref.row && pref.row.isConnected) el = els.find(x => containsDeep(pref.row, x)) || null;
+    if (!el && pref && pref.key) el = els.find(x => { const a = rowAt(x); return a && (a.key === pref.key || rowSim(pref.key, a.key) >= 0.8); }) || null;
+    if (!el) el = els.find(x => inViewport(rectOf(x, true))) || els[0] || null;
+    return { el, els };
+  }
+  /** The row control the user clicked, when node is (inside) one that matches the descriptor; else null. */
+  function matchRow(d, node) {
+    const ro = rowOfDesc(d);
+    if (!ro || !node) return null;
+    const el = retarget(node.nodeType === 1 ? node : node.parentElement);
+    if (!el || (flags(el) & BAD)) return null;
+    const pl = rowPlace(el);
+    if (!pl || pl.sig !== ro.row || pl.role !== ro.role || !boxesFor(ro).includes(pl.box)) return null;
+    return rowCands(ro, pl.row, pl.box, colIn(ro, pl.box)).includes(el) ? el : null;
   }
 
   // ---------- features of one element (cheap part cached per task, context added on demand) ----------
@@ -1280,6 +1519,10 @@
     if (f.container) fp.container = f.container;
     if (f.neighbors.length) fp.neighbors = f.neighbors;
     if (f.row) fp.row = f.row;
+    // Repeated once per row of a data table or list: how to find it in any row (see rowInfo).
+    let ro = null;
+    try { ro = rowInfo(el); } catch (e) { ro = null; }
+    if (ro) fp.rowOf = ro;
     if (f.ancestry.length) fp.ancestry = f.ancestry;
     const tw = memo ? twinIn(el, f, memo) : twinOf(el, controls(null));
     if (tw && tw.count > 1) fp.twin = tw;
@@ -1372,10 +1615,15 @@
    * el is set only when the best candidate scores >= 0.70 and leads the runner-up by >= 0.10
    * (>= 0.85 when the descriptor was made on another page).
    */
-  function resolveDetailed(d) {
+  function resolveDetailed(d, opts) {
     const none = { el: null, score: 0, margin: 0, ambiguous: false, candidates: [], via: 'none' };
     const fp = fpOf(d);
     if (!fp) return none;
+    // A guide step on a row control (d.row, set by brain.refSteps): any row of the same table, never the sample's.
+    if (d.row && fp.rowOf) {
+      const r = resolveRow(d, opts);
+      return { el: r.el, score: r.el ? 1 : 0, margin: 1, ambiguous: false, candidates: r.els.slice(0, 8).map(el => ({ el, score: 1 })), via: r.el ? 'row' : 'none' };
+    }
     const need = d.path && pathKey(d.path) !== pathKey(pathNow()) ? T_OTHER_PAGE : T_ACCEPT;
 
     // Re-render fast path: the element found last time is still here and still matches.
@@ -1415,9 +1663,12 @@
     };
   }
 
-  /** The element a descriptor (or a bare {text}) points at, or null when not sure. */
-  function resolve(d) {
-    try { return resolveDetailed(d).el; } catch (e) { return null; }
+  /**
+   * The element a descriptor (or a bare {text}) points at, or null when not sure. A row step (d.row) resolves to
+   * a matching control in any row; opts.prefer ({ row } or { key }, see rowAt) picks the row the user chose.
+   */
+  function resolve(d, opts) {
+    try { return resolveDetailed(d, opts).el; } catch (e) { return null; }
   }
 
   /**
@@ -1448,6 +1699,10 @@
   S.resolve = resolve;
   S.resolveDetailed = resolveDetailed;
   S.candidatesFor = candidatesFor;
+  S.rowInfo = el => { try { return el && el.nodeType === 1 ? rowInfo(retarget(el) || el) : null; } catch (e) { return null; } };
+  S.resolveRow = (d, opts) => { try { return resolveRow(d, opts); } catch (e) { return { el: null, els: [] }; } };
+  S.matchRow = (d, node) => { try { return matchRow(d, node); } catch (e) { return null; } };
+  S.rowAt = node => { try { return rowAt(node); } catch (e) { return null; } };
   S.labelOf = labelOf;
   S.deepQueryAll = deepQueryAll;
   S.rectOf = rectOf;

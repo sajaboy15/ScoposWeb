@@ -144,6 +144,22 @@ main { flex: 1; overflow-y: auto; padding: 6px 18px 20px; scroll-behavior: smoot
 .pill { border-radius: 999px; padding: 1px 9px; font-size: 12px; }
 .pill.ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
 .pill.need { background: var(--accent-soft); color: var(--accent-ink); }
+.limitrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.limitrow .cur { color: var(--ink-3); font-size: 14px; }
+.limitrow input { width: 84px; height: 38px; border: 1px solid var(--rule); border-radius: 12px; background: var(--paper); padding: 0 10px; font-variant-numeric: tabular-nums; }
+.limitrow input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+.limitrow .month { margin-left: 8px; font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.limitrow .month.over { color: var(--bad); }
+.toggle { display: flex; gap: 10px; align-items: flex-start; margin-top: 12px; font-size: 13px; color: var(--ink-2); cursor: pointer; }
+.toggle input { margin: 3px 0 0; accent-color: var(--accent); flex: none; }
+.ver { margin: 18px 0 0; font-size: 11.5px; color: var(--ink-3); letter-spacing: .02em; }
+
+/* no access banner */
+.access { margin-top: 14px; border-radius: 16px; padding: 14px; background: var(--accent-soft); animation: appear .28s var(--ease); }
+.access b { display: block; font-weight: 600; margin-bottom: 4px; }
+.access p { margin: 0 0 10px; color: var(--ink-2); font-size: 13.5px; }
+.access.quiet { background: var(--paper-2); }
+.access .row:empty { display: none; }
 
 /* composer */
 .composer { position: relative; margin: 0 14px 14px; padding: 6px 6px 6px 14px; border: 1px solid var(--rule); border-radius: 20px; background: var(--paper); box-shadow: var(--shadow); display: flex; align-items: flex-end; gap: 8px; transition: border-color .2s, box-shadow .2s; }

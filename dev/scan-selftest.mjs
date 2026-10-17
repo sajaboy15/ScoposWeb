@@ -123,10 +123,41 @@ check('identity gate passes on name', identityOK({ name: n('Сохранить')
 check('identity gate passes on testid', identityOK({ name: n('Сохранить'), testid: 'save' }, { name: n('Применить'), testid: 'save' }));
 check('identity gate nameless target', identityOK({ role: 'button' }, { role: 'button' }));
 
+// row controls: the generic label of a control repeated per row, and matching any row's label
+{
+  const { rowPattern, labelFits } = S._test;
+  const act = rowPattern(['Actions for load 1066', 'Actions for load 1065', 'Actions for load 1040'], 'button');
+  check('row: "Actions for load …"', act.label === 'Actions for load …' && act.pre === 'actions for load' && act.suf === '' && !act.data, act);
+  check('row: any load fits, another action does not', labelFits(act, 'Actions for load 2207') && labelFits(act, 'Actions for load A-77') && !labelFits(act, 'Actions for invoice INV-1') && !labelFits(act, 'Delete'));
+  const edit = rowPattern(['Edit Marcus Reed', 'Edit Ana Lopez', 'Edit Jamal Carter'], 'button');
+  check('row: "Edit …"', edit.label === 'Edit …' && edit.pre === 'edit', edit);
+  check('row: Edit fits any driver, not "Delete Ana"', labelFits(edit, 'Edit Zoe Park') && !labelFits(edit, 'Delete Ana Lopez'));
+  const inv = rowPattern(['Actions for invoice INV-5020', 'Actions for invoice INV-5019'], 'button');
+  check('row: invoice numbers are data', inv.label === 'Actions for invoice …' && labelFits(inv, 'Actions for invoice INV-9001'), inv);
+  const id = rowPattern(['1066', '1065', '1064'], 'link');
+  check('row: a record number link is data', id.data === true && labelFits(id, '77'), id);
+  const names = rowPattern(['Summit Freight Brokerage', 'Lone Star Logistics', 'Great Lakes Freight'], 'link');
+  check('row: company names are data', names.data === true, names);
+  const llc = rowPattern(['Acme Trucking LLC', 'Bolt Hauling LLC'], 'link');
+  check('row: a link with a shared suffix but mostly data is data', llc.data === true, llc);
+  const same = rowPattern(['Dispatch', 'Dispatch', 'Dispatch'], 'button');
+  check('row: the same label in every row', same.same === true && same.label === 'Dispatch' && labelFits(same, 'Dispatch') && !labelFits(same, 'Dispatch all'), same);
+  const glyph = rowPattern(['⋯', '⋯'], 'button');
+  check('row: a glyph label', glyph.same === true && labelFits(glyph, '⋯') && !labelFits(glyph, '+'), glyph);
+  const view = rowPattern(['View invoice 12', 'View invoice 13'], 'link');
+  check('row: a link with an action prefix keeps it', view.label === 'View invoice …' && !view.data, view);
+  const ru = rowPattern(['Изменить груз 1066', 'Изменить груз 1065'], 'button');
+  check('row: Russian', ru.label === 'Изменить груз …' && labelFits(ru, 'Изменить груз 7'), ru);
+  const mid = rowPattern(['Send 1066 to driver', 'Send 1065 to driver'], 'button');
+  check('row: data in the middle', mid.label === 'Send … to driver' && labelFits(mid, 'Send 9 to driver') && !labelFits(mid, 'Send 9 to broker'), mid);
+}
+
 // routes
 check('route ids templated', pathKey('/deals/123') === pathKey('/deals/456/'));
 check('non-route hash ignored', pathKey('/a#section') === pathKey('/a'));
 check('hash route kept', pathKey('/#/deals/5?x=1') === '/#/deals/:id');
+check('record detail after a row step: any load is the same screen', pathKey('/demo/tms/index.html#/loads/1066') === pathKey('http://localhost:4173/demo/tms/index.html#/loads/2207')
+  && pathKey('/demo/tms/index.html#/loads/1066') === '/demo/tms/index.html#/loads/:id' && pathKey('/x#/billing/invoices/5020') === '/x#/billing/invoices/:id');
 
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

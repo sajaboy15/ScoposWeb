@@ -89,6 +89,13 @@ const invoices = [
 ];
 let flash = '';
 let plan = 'Команда';
+let company = 'Ledgerly Demo';
+// Every change goes to the server first, like a real product would. The demo server has no such endpoint
+// (404) and a walk blocks writes altogether: the UI updates either way.
+async function write(what, data) {
+  try { await fetch('/api/demo/write', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ what, data }) }); } catch (e) { /* offline or blocked */ }
+}
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const views = {
   '/': () => `<header class="page"><h1>Обзор</h1></header>
     <div class="cards"><div class="card"><span>Выставлено за месяц</span><b>427 300 ₽</b></div><div class="card"><span>Оплачено</span><b>141 300 ₽</b></div><div class="card"><span>Ждут оплаты</span><b>2 счёта</b></div></div>
@@ -103,7 +110,12 @@ const views = {
       <label>Срок оплаты<select name="due"><option>7 дней</option><option>14 дней</option><option>30 дней</option></select></label>
       <div><button class="btn primary" id="send-invoice" type="submit">Отправить счёт</button> <a class="btn" href="#/invoices" style="display:inline-grid;place-items:center;text-decoration:none">Отмена</a></div>
     </form>`,
-  '/clients': () => `<header class="page"><h1>Клиенты</h1><button class="btn">Добавить клиента</button></header><table><tbody>${clients.map(c => `<tr><td>${c}</td></tr>`).join('')}</tbody></table>`,
+  '/clients': () => `${flash ? `<div class="ok">${flash}</div>` : ''}<header class="page"><h1>Клиенты</h1><button class="btn primary" id="add-client" type="button" aria-haspopup="dialog">Добавить клиента</button></header><table><tbody>${clients.map(c => `<tr><td>${c}</td></tr>`).join('')}</tbody></table>
+    <dialog id="client-dlg" aria-labelledby="client-dlg-title"><form class="f" id="client-form"><h1 id="client-dlg-title" style="font-size:18px">Новый клиент</h1>
+      <label>Название<input name="name" required placeholder="ООО «Ромашка»"></label>
+      <label>ИНН<input name="inn" inputmode="numeric" placeholder="10 или 12 цифр"></label>
+      <label>Email<input name="email" type="email" placeholder="buh@company.com"></label>
+      <div><button class="btn primary" id="save-client" type="submit">Сохранить клиента</button> <button class="btn" id="cancel-client" type="button">Отмена</button></div></form></dialog>`,
   '/settings': (tab = 'company') => `${flash ? `<div class="ok">${flash}</div>` : ''}<header class="page"><h1>Настройки</h1></header>
     <div class="tabs" role="tablist"><a href="#/settings" role="tab" aria-selected="${tab === 'company'}">Компания</a><a href="#/settings/team" id="tab-team" role="tab" aria-selected="${tab === 'team'}">Команда</a><a href="#/settings/billing" role="tab" aria-selected="${tab === 'billing'}">Оплата</a></div>
     ${tab === 'team' ? `<header class="page"><span class="muted">3 участника</span><button class="btn primary" id="invite" aria-haspopup="dialog">Пригласить коллегу</button></header>
@@ -117,7 +129,7 @@ const views = {
         <form class="f" id="plan-form" hidden style="margin-top:18px">
           <label>Новый тариф<select name="plan">${['Старт · 990 ₽', 'Команда · 2 900 ₽', 'Бизнес · 7 900 ₽'].map(p => `<option${p.startsWith(plan) ? ' selected' : ''}>${p}</option>`).join('')}</select></label>
           <div><button class="btn primary" id="confirm-plan" type="submit">Подтвердить</button></div>
-        </form>` : '<form class="f"><label>Название компании<input value="Ledgerly Demo"></label><label>ИНН<input placeholder="10 или 12 цифр"></label></form>'}`,
+        </form>` : `<form class="f" id="company-form"><label>Название компании<input name="company" value="${company}"></label><label>ИНН<input name="inn" placeholder="10 или 12 цифр"></label><div><button class="btn primary" id="save-company" type="submit">Сохранить</button></div></form>`}`,
 };
 function route() {
   const path = location.hash.slice(1) || '/';
@@ -130,12 +142,24 @@ function route() {
 document.addEventListener('click', e => {
   if (e.target.id === 'new-invoice') location.hash = '#/invoices/new';
   if (e.target.id === 'invite') document.getElementById('dlg').showModal();
+  if (e.target.id === 'add-client') document.getElementById('client-dlg').showModal();
+  if (e.target.id === 'cancel-client') document.getElementById('client-dlg').close();
   if (e.target.id === 'change-plan') { document.getElementById('plan-form').hidden = false; e.target.hidden = true; }
 });
 document.addEventListener('submit', e => {
-  if (e.target.id === 'inv-form') { e.preventDefault(); flash = 'Счёт отправлен клиенту'; location.hash = '#/invoices'; }
-  if (e.target.id === 'plan-form') { e.preventDefault(); plan = e.target.plan.value.split(' · ')[0]; flash = `Тариф изменён на «${plan}»`; route(); }
-  if (e.target.id === 'inv-dlg') { setTimeout(() => { flash = 'Приглашение отправлено'; route(); }, 0); }
+  if (e.target.id === 'inv-form') { e.preventDefault(); write('invoice'); flash = 'Счёт отправлен клиенту'; location.hash = '#/invoices'; }
+  if (e.target.id === 'plan-form') { e.preventDefault(); plan = e.target.plan.value.split(' · ')[0]; write('plan', plan); flash = `Тариф изменён на «${plan}»`; route(); }
+  if (e.target.id === 'inv-dlg') { if (e.submitter && e.submitter.value === 'cancel') return; write('invite'); setTimeout(() => { flash = 'Приглашение отправлено'; route(); }, 0); }
+  if (e.target.id === 'client-form') {
+    e.preventDefault();
+    const name = e.target.elements.namedItem('name').value.trim();
+    if (!name) return;
+    write('client', name);
+    clients.push(esc(name));
+    document.getElementById('client-dlg').close();
+    flash = `Клиент «${esc(name)}» добавлен`; route();
+  }
+  if (e.target.id === 'company-form') { e.preventDefault(); company = esc(e.target.elements.namedItem('company').value.trim() || company); write('company', company); flash = 'Изменения сохранены'; route(); }
 });
 addEventListener('hashchange', route);
 route();

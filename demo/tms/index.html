@@ -1,0 +1,994 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Haulr TMS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%232c6a5a%22/%3E%3Ctext x=%2216%22 y=%2222%22 font-size=%2218%22 text-anchor=%22middle%22 fill=%22white%22 font-family=%22Arial%22%3EH%3C/text%3E%3C/svg%3E">
+<style>
+/* Haulr TMS: a fictional trucking TMS used as a test fixture for Scopos. Single file, no external resources.
+   Every commit button POSTs to /api/tms/write; opening forms, tabs, menus, drawers and popovers never hits the network. */
+:root { --bg:#f5f6f8; --panel:#fff; --line:#e2e5ea; --line-2:#eef0f3; --text:#1c2230; --muted:#667085; --faint:#98a0ae;
+  --brand:#2c6a5a; --brand-2:#e5f1ed; --side:#16211e; --side-2:#22302c; --side-text:#c5d0cc;
+  --blue:#2a5fc4; --blue-bg:#e7eefc; --amber:#946000; --amber-bg:#fcf1d9; --green:#20724a; --green-bg:#e1f3e9;
+  --red:#b3342c; --red-bg:#fbe6e4; --violet:#6847b3; --violet-bg:#eee9fb; --gray-bg:#eef0f3;
+  --shadow:0 10px 30px rgba(18,26,42,.14); color-scheme: light; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; color: var(--text); background: var(--bg); }
+a { color: var(--blue); text-decoration: none; } a:hover { text-decoration: underline; }
+h1 { font-size: 21px; margin: 0; letter-spacing: -.01em; } h2 { font-size: 15px; margin: 0 0 10px; } h3 { font-size: 14px; margin: 0 0 6px; }
+.muted { color: var(--muted); } .sm { font-size: 12px; } .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.grow { flex: 1; }
+/* shell */
+.app { display: grid; grid-template-columns: 236px 1fr; grid-template-rows: 56px 1fr; height: 100vh; }
+.app.collapsed { grid-template-columns: 64px 1fr; }
+.app.collapsed .lbl, .app.collapsed .nav-h, .app.collapsed .brand-name, .app.collapsed .chev { display: none; }
+.sidebar { grid-row: 1 / 3; background: var(--side); color: var(--side-text); display: flex; flex-direction: column; overflow-y: auto; }
+.brand { display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 18px; font-weight: 700; color: #fff; font-size: 16px; }
+.logo { width: 28px; height: 28px; border-radius: 7px; background: linear-gradient(135deg,#3f9a80,#2c6a5a); display: grid; place-items: center; font-size: 15px; color: #fff; flex: none; }
+nav.main-nav { padding: 6px 10px; flex: 1; }
+.nav-h { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #7f8e89; padding: 14px 10px 6px; }
+.nav-link, .nav-group { display: flex; align-items: center; gap: 10px; width: 100%; padding: 7px 10px; border-radius: 7px; color: var(--side-text); background: none; border: 0; font: inherit; cursor: pointer; text-align: left; }
+.nav-link:hover, .nav-group:hover { background: var(--side-2); color: #fff; text-decoration: none; }
+.nav-link[aria-current="page"] { background: #2b3f39; color: #fff; font-weight: 600; }
+.nav-sub { list-style: none; margin: 2px 0 4px; padding: 0 0 0 28px; }
+.nav-sub .nav-link { padding: 6px 10px; }
+.nav-group .chev { margin-left: auto; transition: transform .15s; } .nav-group[aria-expanded="true"] .chev { transform: rotate(180deg); }
+.side-foot { padding: 10px; border-top: 1px solid var(--side-2); display: flex; flex-direction: column; gap: 4px; }
+.side-foot .icon-btn { color: var(--side-text); align-self: flex-start; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 0 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.gsearch { position: relative; flex: 1; max-width: 520px; }
+.gsearch input { width: 100%; height: 36px; padding: 0 12px 0 36px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font: inherit; }
+.gsearch .ic { position: absolute; left: 11px; top: 9px; color: var(--faint); }
+.gsearch [role=listbox] { position: absolute; top: 40px; left: 0; right: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); padding: 4px; z-index: 30; }
+.gsearch [role=option] { display: flex; justify-content: space-between; padding: 7px 10px; border-radius: 6px; color: var(--text); }
+.gsearch [role=option]:hover, .gsearch [role=option][aria-selected=true] { background: var(--bg); text-decoration: none; }
+.top-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.user-btn { display: flex; align-items: center; gap: 8px; border: 0; background: none; font: inherit; cursor: pointer; padding: 4px 6px; border-radius: 8px; color: var(--text); }
+.user-btn:hover { background: var(--bg); }
+.avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--brand-2); color: var(--brand); display: grid; place-items: center; font-weight: 700; font-size: 12px; }
+main { overflow-y: auto; padding: 22px 28px 60px; min-width: 0; }
+/* controls */
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 13px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; font: inherit; font-weight: 500; white-space: nowrap; }
+.btn:hover { background: var(--bg); text-decoration: none; }
+.btn.primary { background: var(--brand); border-color: var(--brand); color: #fff; } .btn.primary:hover { background: #245a4c; }
+.btn.danger { background: var(--red); border-color: var(--red); color: #fff; }
+.btn:disabled, .btn[aria-busy=true] { opacity: .6; cursor: progress; }
+.btn.sm { height: 28px; padding: 0 10px; font-size: 13px; }
+.icon-btn { position: relative; display: inline-grid; place-items: center; width: 34px; height: 34px; border-radius: 7px; border: 0; background: none; color: var(--muted); cursor: pointer; font: inherit; font-size: 18px; line-height: 1; }
+.icon-btn:hover { background: var(--bg); color: var(--text); }
+.icon-btn .count { position: absolute; top: 3px; right: 3px; min-width: 16px; height: 16px; border-radius: 8px; background: var(--red); color: #fff; font-size: 10px; font-weight: 700; display: grid; place-items: center; padding: 0 4px; }
+.ic { flex: none; }
+input, select, textarea { font: inherit; color: var(--text); }
+.field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; min-width: 0; }
+.field label, .lbl-text { font-size: 13px; font-weight: 500; color: #3a4252; }
+.field input:not([type=checkbox]):not([type=radio]), .field select, .field textarea, .ctl { height: 34px; border: 1px solid #d3d8df; border-radius: 7px; padding: 0 10px; background: #fff; width: 100%; }
+.field textarea { height: auto; min-height: 76px; padding: 8px 10px; resize: vertical; }
+.field input:focus, .field select:focus, .field textarea:focus, .ctl:focus, .cselect-btn:focus { outline: 2px solid #9cc9bb; outline-offset: 0; border-color: var(--brand); }
+.field .err { color: var(--red); font-size: 12px; } [aria-invalid=true] { border-color: var(--red) !important; }
+.field.check { flex-direction: row; align-items: center; gap: 8px; } .field.check label { font-weight: 400; }
+.req { color: var(--red); } .hint { color: var(--muted); font-size: 12px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; } .grid3 { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 0 14px; }
+/* page */
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
+.page-head p { margin: 4px 0 0; }
+.actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.crumbs { font-size: 13px; color: var(--muted); margin-bottom: 8px; } .crumbs a { color: var(--muted); }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.card.flush { padding: 0; overflow: hidden; }
+.card-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line-2); }
+.card-head h2 { margin: 0; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.kpi-label { color: var(--muted); font-size: 12.5px; } .kpi-value { font-size: 22px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; } .kpi-sub { font-size: 12px; color: var(--muted); }
+.cols { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; align-items: start; }
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px 20px; margin: 0; }
+.facts dt { color: var(--muted); font-size: 12px; } .facts dd { margin: 2px 0 0; font-weight: 500; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; background: var(--gray-bg); color: #4a5263; }
+.badge.blue { background: var(--blue-bg); color: var(--blue); } .badge.amber { background: var(--amber-bg); color: var(--amber); } .badge.green { background: var(--green-bg); color: var(--green); }
+.badge.red { background: var(--red-bg); color: var(--red); } .badge.violet { background: var(--violet-bg); color: var(--violet); }
+/* tables */
+.table-wrap { overflow: auto; } .table-wrap.scroll { max-height: calc(100vh - 330px); min-height: 280px; }
+table { border-collapse: separate; border-spacing: 0; width: 100%; background: var(--panel); }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--line-2); vertical-align: top; }
+th { font-size: 12px; font-weight: 600; color: var(--muted); background: #fafbfc; white-space: nowrap; }
+thead th { position: sticky; top: 0; z-index: 2; }
+tbody tr:hover td { background: #fafcfb; }
+td.chk, th.chk { width: 36px; } td.act { width: 44px; text-align: right; padding: 4px 8px; }
+.hide-miles .col-miles, .hide-rpm .col-rpm, .hide-truck .col-truck { display: none; }
+.filters { display: flex; gap: 10px; align-items: flex-end; padding: 12px 16px; border-bottom: 1px solid var(--line-2); flex-wrap: wrap; }
+.filters .field { margin: 0; } .filters .field input, .filters .field select { min-width: 160px; }
+.pager { display: flex; align-items: center; gap: 10px; justify-content: flex-end; padding: 10px 16px; font-size: 13px; color: var(--muted); }
+.pager select { height: 30px; border: 1px solid var(--line); border-radius: 6px; }
+.bulk { padding: 8px 16px; background: var(--brand-2); color: var(--brand); font-size: 13px; font-weight: 500; }
+/* tabs */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 16px; overflow-x: auto; overflow-y: hidden; }
+.card > .tabs { margin: 0; padding: 0 12px; }
+[role=tab] { border: 0; background: none; font: inherit; color: var(--muted); padding: 10px 12px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; white-space: nowrap; font-weight: 500; }
+[role=tab][aria-selected=true] { color: var(--brand); border-bottom-color: var(--brand); }
+[role=tab] .n { display: inline-block; margin-left: 6px; padding: 0 7px; border-radius: 9px; background: var(--gray-bg); font-size: 11.5px; color: var(--muted); }
+/* floating: menus, popovers, listbox */
+#layer > * { position: fixed; z-index: 60; background: var(--panel); border: 1px solid var(--line); border-radius: 9px; box-shadow: var(--shadow); }
+.menu { list-style: none; margin: 0; padding: 5px; min-width: 190px; }
+.menu [role=menuitem] { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; background: none; font: inherit; color: var(--text); border-radius: 6px; cursor: pointer; text-align: left; }
+.menu [role=menuitem]:hover, .menu [role=menuitem]:focus { background: var(--bg); outline: none; text-decoration: none; }
+.menu [role=menuitem].danger { color: var(--red); } .menu [aria-disabled=true] { color: var(--faint); cursor: not-allowed; }
+.menu [role=separator] { height: 1px; background: var(--line-2); margin: 4px 0; }
+.popover { width: 340px; padding: 0; } .popover .pop-head { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid var(--line-2); }
+.popover .pop-body { padding: 12px 14px; } .popover .pop-foot { padding: 10px 14px; border-top: 1px solid var(--line-2); display: flex; gap: 8px; justify-content: flex-end; }
+.notif { list-style: none; margin: 0; padding: 0; } .notif li { padding: 10px 14px; border-bottom: 1px solid var(--line-2); font-size: 13px; } .notif li.unread { background: #f6faf8; } .notif li:last-child { border: 0; }
+.cselect { position: relative; }
+.cselect-btn { display: flex; align-items: center; justify-content: space-between; width: 100%; height: 34px; border: 1px solid #d3d8df; border-radius: 7px; padding: 0 10px; background: #fff; font: inherit; cursor: pointer; text-align: left; }
+.cselect [role=listbox] { position: absolute; top: 38px; left: 0; right: 0; margin: 0; padding: 4px; list-style: none; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); z-index: 20; }
+.cselect [role=option] { padding: 7px 10px; border-radius: 6px; cursor: pointer; } .cselect [role=option]:hover { background: var(--bg); } .cselect [role=option][aria-selected=true] { font-weight: 600; color: var(--brand); }
+/* dialogs and drawer */
+dialog.modal { border: 0; padding: 0; border-radius: 12px; box-shadow: var(--shadow); width: min(520px, calc(100vw - 32px)); color: var(--text); }
+dialog.modal::backdrop { background: rgba(16,22,34,.42); }
+.overlay { position: fixed; inset: 0; background: rgba(16,22,34,.42); display: grid; place-items: center; z-index: 50; padding: 16px; }
+.overlay > .modal { background: var(--panel); border-radius: 12px; box-shadow: var(--shadow); width: min(520px, 100%); max-height: calc(100vh - 32px); overflow: auto; }
+.modal.lg { width: min(680px, calc(100vw - 32px)); }
+.modal-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--line-2); }
+.modal-head h2 { margin: 0; font-size: 16px; }
+.modal-body { padding: 16px 18px 6px; } .modal-body > p:first-child { margin-top: 0; }
+.modal-foot { display: flex; gap: 8px; justify-content: flex-end; align-items: center; padding: 12px 18px; border-top: 1px solid var(--line-2); background: #fafbfc; }
+.drawer-wrap { position: fixed; inset: 0; z-index: 50; }
+.drawer-backdrop { position: absolute; inset: 0; background: rgba(16,22,34,.32); }
+.drawer { position: absolute; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); background: var(--panel); box-shadow: var(--shadow); display: flex; flex-direction: column; animation: slide .18s ease-out; }
+.drawer form { display: flex; flex-direction: column; height: 100%; } .drawer .modal-body { flex: 1; overflow: auto; }
+@keyframes slide { from { transform: translateX(40px); opacity: .4; } }
+.steps { display: flex; gap: 8px; list-style: none; padding: 0; margin: 0 0 14px; font-size: 13px; color: var(--muted); }
+.steps li { flex: 1; padding: 6px 8px; border-radius: 6px; background: var(--bg); } .steps li[aria-current=step] { background: var(--brand-2); color: var(--brand); font-weight: 600; }
+.plans { display: grid; gap: 8px; } .plans label { display: flex; gap: 10px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; cursor: pointer; }
+/* misc */
+.toasts { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 100; }
+.toast { display: flex; align-items: center; gap: 12px; background: #1f2a27; color: #fff; padding: 10px 10px 10px 14px; border-radius: 9px; box-shadow: var(--shadow); min-width: 300px; }
+.toast.error { background: #8f2620; } .toast .icon-btn { color: #fff; width: 26px; height: 26px; margin-left: auto; font-size: 15px; }
+.stop-box { border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px 2px; margin-bottom: 12px; }
+fieldset { border: 0; padding: 0; margin: 0; } legend { font-weight: 600; font-size: 15px; margin-bottom: 10px; padding: 0; }
+.form-section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px 6px; margin-bottom: 14px; }
+.form-foot { display: flex; justify-content: flex-end; gap: 8px; position: sticky; bottom: -60px; padding: 12px 0; background: var(--bg); }
+.err-summary { background: var(--red-bg); color: var(--red); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; }
+.route { display: flex; align-items: center; gap: 18px; } .route .arrow { color: var(--faint); font-size: 20px; } .route b { display: block; font-size: 15px; }
+.timeline { list-style: none; margin: 0; padding: 0; } .timeline li { padding: 8px 0 8px 18px; border-left: 2px solid var(--line); position: relative; }
+.timeline li::before { content: ""; position: absolute; left: -6px; top: 13px; width: 10px; height: 10px; border-radius: 50%; background: var(--brand); }
+.bars { display: flex; align-items: flex-end; gap: 10px; height: 150px; padding-top: 8px; } .bars div { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); }
+.bars span { width: 100%; background: #8fc3b2; border-radius: 4px 4px 0 0; } .bars div:last-child span { background: var(--brand); }
+.alerts { list-style: none; margin: 0; padding: 0; } .alerts li { padding: 9px 0; border-bottom: 1px solid var(--line-2); font-size: 13px; } .alerts li:last-child { border: 0; }
+.board { table-layout: fixed; } .board td, .board th { border-right: 1px solid var(--line-2); padding: 6px; } .board th:first-child, .board td:first-child { width: 170px; }
+.board th.today { color: var(--brand); background: var(--brand-2); }
+.chip { display: block; width: 100%; margin-bottom: 4px; border: 0; border-radius: 6px; padding: 4px 6px; font: inherit; font-size: 12px; text-align: left; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip.dispatched { background: var(--blue-bg); color: var(--blue); } .chip.in_transit { background: var(--amber-bg); color: var(--amber); } .chip.delivered, .chip.invoiced { background: var(--green-bg); color: var(--green); } .chip.available { background: var(--gray-bg); color: #4a5263; border: 1px dashed #b9c0cb; }
+.chip.cont { opacity: .7; }
+.int-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+.int-cards .card { display: flex; flex-direction: column; gap: 8px; margin: 0; } .int-cards .card p { margin: 0; color: var(--muted); font-size: 13px; flex: 1; }
+.report-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.report-cards button { text-align: left; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; font: inherit; cursor: pointer; }
+.report-cards button[aria-pressed=true] { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-2); }
+.report-cards b { display: block; margin-bottom: 4px; } .report-cards span { color: var(--muted); font-size: 12.5px; }
+.login { min-height: 100vh; display: grid; place-items: center; background: linear-gradient(160deg, #eaf3f0, #f5f6f8); }
+.login .card { width: 360px; padding: 26px; } .login .brand { color: var(--text); padding: 0; height: auto; margin-bottom: 18px; }
+@media (max-width: 900px) { .cols, .grid3 { grid-template-columns: 1fr; } .app { grid-template-columns: 64px 1fr; } .app .lbl, .app .nav-h, .app .brand-name, .app .chev { display: none; } }
+</style>
+</head>
+<body>
+<div id="app" class="app">
+  <aside class="sidebar" aria-label="Sidebar">
+    <div class="brand"><span class="logo" aria-hidden="true">H</span><span class="brand-name">Haulr TMS</span></div>
+    <nav class="main-nav" id="nav" aria-label="Main navigation"></nav>
+    <div class="side-foot" id="side-foot"></div>
+  </aside>
+  <header class="topbar">
+    <div class="gsearch">
+      <svg class="ic" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM21 21l-4.3-4.3"/></svg>
+      <input id="gsearch" type="search" role="combobox" aria-label="Search loads, drivers, trucks and customers" aria-expanded="false" aria-controls="gsearch-list" aria-autocomplete="list" autocomplete="off" placeholder="Search loads, drivers, trucks, customers…">
+      <div id="gsearch-list" role="listbox" aria-label="Search results" hidden></div>
+    </div>
+    <div class="top-actions">
+      <button type="button" class="btn primary" id="new-btn" aria-haspopup="menu" aria-expanded="false" data-act="menu" data-menu="new">+ New <span aria-hidden="true">▾</span></button>
+      <button type="button" class="icon-btn" id="bell" aria-label="Notifications" aria-haspopup="dialog" aria-expanded="false" data-act="bell"></button>
+      <div class="icon-btn" role="button" tabindex="0" title="Help" data-act="help" aria-haspopup="dialog" aria-expanded="false">?</div>
+      <button type="button" class="user-btn" id="user-btn" aria-haspopup="menu" aria-expanded="false" data-act="menu" data-menu="user"><span class="avatar" aria-hidden="true">DW</span><span>Dana Whitfield</span><span aria-hidden="true" class="muted">▾</span></button>
+    </div>
+  </header>
+  <main id="main"></main>
+</div>
+<div id="login" hidden></div>
+<div id="layer"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<script>
+(() => {
+'use strict';
+// ================= utilities =================
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+let seed = 20261015;
+const rnd = () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const pick = a => a[Math.floor(rnd() * a.length)];
+const int = (a, b) => a + Math.floor(rnd() * (b - a + 1));
+const pad = n => String(n).padStart(2, '0');
+const TODAY = new Date(2026, 9, 15);
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const fmtD = d => d ? `${MON[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}` : '—';
+const fmtS = d => `${MON[d.getMonth()]} ${d.getDate()}`;
+const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseIso = s => { const [y, m, d] = String(s).split('-').map(Number); return y ? new Date(y, m - 1, d) : null; };
+const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+const money = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const money0 = n => '$' + Math.round(n || 0).toLocaleString('en-US');
+const phone = () => `(${int(201, 989)}) 555-${pad(int(10, 99))}${pad(int(0, 99))}`;
+let uid = 0;
+const ICONS = {
+  dash: 'M3 3h7v7H3zM14 3h7v4h-7zM14 10h7v11h-7zM3 13h7v8H3z', box: 'M3 7l9-4 9 4v10l-9 4-9-4zM3 7l9 4 9-4M12 11v10',
+  board: 'M3 4h18v16H3zM3 9h18M9 4v16M15 4v16', user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4 21a8 8 0 0 1 16 0',
+  truck: 'M1 6h13v10H1zM14 10h4l3 3v3h-7zM7 18.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM19 18.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z',
+  trailer: 'M2 5h17v10H2zM19 13h3M7 18a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zM12 18a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z',
+  building: 'M4 21V5l8-3 8 3v16M9 21v-5h6v5M8 8h.01M12 8h.01M16 8h.01M8 12h.01M12 12h.01M16 12h.01',
+  dollar: 'M12 2v20M17 6H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6', wallet: 'M3 7h18v13H3zM3 7l3-4h12l3 4M16 13h2',
+  fuel: 'M4 21V4h9v17M3 21h11M13 9h3l2 2v7a1.5 1.5 0 0 0 3 0V8l-3-3M7 8h3', wrench: 'M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.5 2.5-2.4-.6-.6-2.4z',
+  doc: 'M6 2h9l5 5v15H6zM14 2v6h6M9 13h8M9 17h8', chart: 'M4 20V10M10 20V4M16 20v-7M22 20H2',
+  gear: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19 12l2-1-1-3-2 .2-1.3-1.3L17 5l-3-1-1 2h-2L10 4 7 5l.3 2L6 8.2 4 8l-1 3 2 1v0l-2 1 1 3 2-.2 1.3 1.3L7 19l3 1 1-2h2l1 2 3-1-.3-2 1.3-1.2 2 .2 1-3z',
+  bell: 'M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0', x: 'M18 6L6 18M6 6l12 12', chev: 'M6 9l6 6 6-6',
+  left: 'M15 18l-6-6 6-6', right: 'M9 18l6-6-6-6', menu: 'M3 6h18M3 12h18M3 18h18', refresh: 'M21 12a9 9 0 1 1-3-6.7L21 8M21 3v5h-5',
+  columns: 'M3 4h18v16H3zM9 4v16M15 4v16', pencil: 'M4 20h4L19 9l-4-4L4 16zM14 6l4 4',
+};
+const ic = (n, s = 18) => `<svg class="ic" width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${ICONS[n]}"/></svg>`;
+
+// ================= fake data (seeded, so every run is identical) =================
+const CITIES = [['Dallas', 'TX', 32.78, -96.80], ['Houston', 'TX', 29.76, -95.37], ['San Antonio', 'TX', 29.42, -98.49], ['Laredo', 'TX', 27.53, -99.49], ['El Paso', 'TX', 31.76, -106.49],
+  ['Atlanta', 'GA', 33.75, -84.39], ['Savannah', 'GA', 32.08, -81.09], ['Chicago', 'IL', 41.88, -87.63], ['Indianapolis', 'IN', 39.77, -86.16], ['Columbus', 'OH', 39.96, -82.99],
+  ['Nashville', 'TN', 36.16, -86.78], ['Memphis', 'TN', 35.15, -90.05], ['Charlotte', 'NC', 35.23, -80.84], ['Jacksonville', 'FL', 30.33, -81.66], ['Orlando', 'FL', 28.54, -81.38],
+  ['Phoenix', 'AZ', 33.45, -112.07], ['Denver', 'CO', 39.74, -104.99], ['Kansas City', 'MO', 39.10, -94.58], ['St. Louis', 'MO', 38.63, -90.20], ['Oklahoma City', 'OK', 35.47, -97.52],
+  ['Little Rock', 'AR', 34.75, -92.29], ['Louisville', 'KY', 38.25, -85.76], ['Albuquerque', 'NM', 35.08, -106.65], ['Salt Lake City', 'UT', 40.76, -111.89], ['Ontario', 'CA', 34.06, -117.65],
+  ['Fresno', 'CA', 36.74, -119.79], ['Omaha', 'NE', 41.26, -95.93], ['Minneapolis', 'MN', 44.98, -93.27], ['Detroit', 'MI', 42.33, -83.05], ['Harrisburg', 'PA', 40.27, -76.88],
+  ['Allentown', 'PA', 40.60, -75.49], ['Newark', 'NJ', 40.74, -74.17], ['Birmingham', 'AL', 33.52, -86.80]];
+const STREETS = ['Industrial Pkwy', 'Commerce Dr', 'Distribution Way', 'Logistics Blvd', 'Warehouse Rd', 'Freight Ln', 'Enterprise Ave', 'Gateway Blvd', 'Trade Center Dr', 'Port Rd'];
+const FIRST = ['Mike', 'Linda', 'Greg', 'Rosa', 'Brian', 'Kelly', 'Dave', 'Nina', 'Scott', 'Angela'];
+const LAST = ['Harper', 'Simmons', 'Ruiz', 'Coleman', 'Fischer', 'Patel', 'Morgan', 'Haines', 'Turner', 'Vance'];
+const EQUIP = ['Dry Van', 'Reefer', 'Flatbed', 'Step Deck'];
+const COMMODITY = { 'Dry Van': ['Paper products', 'Packaged foods', 'Consumer electronics', 'Auto parts', 'Beverages'], Reefer: ['Frozen poultry', 'Fresh produce', 'Dairy'], Flatbed: ['Steel coils', 'Lumber', 'Building materials'], 'Step Deck': ['Machinery', 'Steel beams'] };
+const place = c => `${c[0]}, ${c[1]}`;
+const street = c => `${int(100, 9800)} ${pick(STREETS)}, ${c[0]}, ${c[1]} ${int(10000, 99999)}`;
+function distance(a, b) { const R = 3959, r = x => x * Math.PI / 180, dLa = r(b[2] - a[2]), dLo = r(b[3] - a[3]); const h = Math.sin(dLa / 2) ** 2 + Math.cos(r(a[2])) * Math.cos(r(b[2])) * Math.sin(dLo / 2) ** 2; return Math.round(2 * R * Math.asin(Math.sqrt(h)) * 1.17); }
+const slug = s => s.toLowerCase().replace(/[^a-z]+/g, '');
+
+const customers = [['Summit Freight Brokerage', 'Broker'], ['Bluewater Logistics', 'Broker'], ['Prairie Line Brokers', 'Broker'], ['Keystone Transport Brokers', 'Broker'], ['Ironhorse Freight Solutions', 'Broker'], ['Copperleaf Logistics', 'Broker'],
+  ['Northfield Foods', 'Shipper'], ['Redrock Building Supply', 'Shipper'], ['Lakeshore Paper Mills', 'Shipper'], ['Cascade Valley Produce', 'Shipper'], ['Gulfside Plastics', 'Shipper'], ['Tri-County Steel Works', 'Shipper']]
+  .map(([name, type], i) => ({ id: i + 1, name, type, mc: type === 'Broker' ? 'MC-' + int(100000, 999999) : '—', contact: pick(FIRST) + ' ' + pick(LAST), phone: phone(), email: 'dispatch@' + slug(name) + '.example', terms: pick(['Net 30', 'Net 30', 'Net 15', 'Quick Pay']), credit: i === 10 ? 'On hold' : 'Approved', city: pick(CITIES) }));
+const trucks = Array.from({ length: 18 }, (_, i) => { const [make, model] = pick([['Freightliner', 'Cascadia'], ['Volvo', 'VNL 860'], ['Kenworth', 'T680'], ['Peterbilt', '579'], ['International', 'LT625']]);
+  return { id: i + 1, unit: String(101 + i), make, model, year: int(2019, 2025), vin: Array.from({ length: 17 }, () => pick('ABCDEFGHJKLMNPRSTUVWXYZ0123456789'.split(''))).join(''), plate: 'TX ' + pick(['R', 'P', 'K']) + int(1000, 9999), odometer: int(80, 640) * 1000 + int(0, 999), nextPm: addDays(TODAY, int(-6, 50)), status: i === 15 ? 'In shop' : 'Active' }; });
+const trailers = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, unit: 'T-' + (201 + i), type: i < 10 ? 'Dry Van' : i < 15 ? 'Reefer' : i < 18 ? 'Flatbed' : 'Step Deck', year: int(2016, 2024), plate: 'TX ' + int(100000, 999999), status: i === 6 ? 'In shop' : 'Available' }));
+const drivers = ['Marcus Reed', 'Tanya Brooks', 'Luis Ortega', 'Jamal Carter', "Kevin O'Neill", 'Sarah Lindqvist', 'DeShawn Miller', 'Ray Gutierrez', 'Emily Novak', 'Tom Becker', 'Andre Wallace', 'Priya Natarajan', 'Bobby Hensley', 'Carlos Mendez', 'Hank Dawson']
+  .map((n, i) => { const [first, last] = n.split(' '); const payType = i % 5 === 3 ? 'Percentage' : i % 7 === 5 ? 'Hourly' : 'Per mile';
+    return { id: i + 1, first, last, phone: phone(), email: (first[0] + last).toLowerCase().replace(/[^a-z]/g, '') + '@haulr-demo.example', cdl: pick(['TX', 'OK', 'AR', 'LA']) + ' ' + int(10000000, 99999999),
+      cdlExp: addDays(TODAY, i === 0 ? 12 : i === 8 ? 26 : int(60, 900)), medExp: addDays(TODAY, int(20, 600)), payType, payRate: payType === 'Per mile' ? (0.58 + int(0, 10) / 100) : payType === 'Percentage' ? int(25, 30) : int(26, 32),
+      truckId: i + 1, hired: new Date(int(2017, 2025), int(0, 11), int(1, 28)), home: pick(['Dallas, TX', 'Fort Worth, TX', 'Houston, TX', 'Oklahoma City, OK']), offDuty: i >= 13 }; });
+const loads = [];
+{ const free = drivers.filter(d => !d.offDuty).map(d => ({ d, until: new Date(2026, 8, 1) }));
+  for (let i = 0; i < 46; i++) {
+    let o, d, mi; do { o = pick(CITIES); d = pick(CITIES); mi = distance(o, d); } while (o === d || mi < 220 || mi > 1500);
+    const equip = rnd() < .55 ? 'Dry Van' : pick(EQUIP), pu = addDays(new Date(2026, 8, 21), Math.floor(i * 0.68)), del = addDays(pu, Math.max(1, Math.ceil(mi / 520)));
+    const rate = Math.round(mi * (2.05 + rnd() * 1.2 + (equip === 'Reefer' ? .25 : 0)) / 5) * 5;
+    const status = del < TODAY ? 'delivered' : pu <= TODAY ? 'in_transit' : (i % 3 === 0 ? 'available' : 'dispatched');
+    let driverId = null, truckId = null, trailerId = null;
+    if (status !== 'available') { free.sort((a, b) => a.until - b.until); const f = free[0]; f.until = addDays(del, 1); driverId = f.d.id; truckId = f.d.truckId;
+      const tr = trailers.filter(t => t.type === equip); trailerId = (tr.length ? pick(tr) : pick(trailers)).id; }
+    const h = pick([6, 7, 8, 9, 10, 13]);
+    loads.push({ id: 1021 + i, customerId: pick(customers).id, o, d, oAddr: street(o), dAddr: street(d), pu, del, puWin: `${pad(h)}:00–${pad(h + 4)}:00`, delWin: `${pad(h)}:00–${pad(h + 6)}:00`,
+      miles: mi, rate, fsc: Math.round(mi * .42), detention: rnd() < .2 ? pick([75, 150]) : 0, status, driverId, truckId, trailerId, equip, commodity: pick(COMMODITY[equip]), weight: int(18, 44) * 1000,
+      ref: 'BK-' + int(40000, 89999), notes: rnd() < .4 ? pick(['Driver must call 1 hr before arrival.', 'Lumper fee reimbursed with receipt.', 'Appointment required at delivery.', 'Tarps required.']) : '', extra: [], history: [] });
+  }
+  // Load 1042 is the canonical example in guides: make it an open, undispatched load.
+  const a = loads.find(l => l.id === 1042), b = loads.find(l => l.status === 'available' && l.id > 1042); [a.id, b.id] = [b.id, a.id];
+  loads.sort((x, y) => x.id - y.id);
+}
+const invoices = [];
+loads.filter(l => l.status === 'delivered').slice(0, 20).forEach((l, k) => {
+  const c = customers.find(x => x.id === l.customerId), issued = addDays(l.del, 1), due = addDays(issued, { 'Net 30': 30, 'Net 15': 15, 'Quick Pay': 2 }[c.terms]);
+  const status = k % 7 === 3 ? 'Factored' : due < TODAY ? (k < 9 ? 'Paid' : 'Overdue') : (k % 5 === 4 ? 'Draft' : 'Sent');
+  invoices.push({ id: 5001 + k, loadId: l.id, customerId: c.id, issued, due, terms: c.terms, amount: l.rate + l.fsc + l.detention, status }); l.status = 'invoiced';
+});
+loads.forEach(l => { const d = drivers.find(x => x.id === l.driverId);
+  l.history.push([addDays(l.pu, -3), 'Load created by Dana Whitfield'], [addDays(l.pu, -3), 'Rate confirmation uploaded']);
+  if (d) l.history.push([addDays(l.pu, -1), `Dispatched to ${d.first} ${d.last}`]);
+  if (l.status === 'in_transit' || l.status === 'delivered' || l.status === 'invoiced') l.history.push([l.pu, 'Picked up — BOL signed']);
+  if (l.status === 'delivered' || l.status === 'invoiced') l.history.push([l.del, 'Delivered — POD uploaded']); });
+const settlements = Array.from({ length: 8 }, (_, i) => { const d = drivers[i], start = addDays(new Date(2026, 8, 28), -7 * (i % 3)), end = addDays(start, 6);
+  const gross = int(2600, 4300) + int(0, 99) / 100, ded = int(180, 640) + int(0, 99) / 100;
+  return { id: 301 + i, driverId: d.id, start, end, loads: int(2, 5), gross, deductions: ded, net: gross - ded, status: i < 3 ? 'Paid' : i < 6 ? 'Approved' : 'Draft' }; });
+const fuel = Array.from({ length: 15 }, (_, i) => { const t = trucks[i % 14], c = pick(CITIES), gal = int(80, 190) + int(0, 9) / 10, ppg = 3.49 + int(0, 60) / 100;
+  return { date: addDays(TODAY, -i), truckId: t.id, driverId: drivers[i % 13].id, where: place(c), state: c[1], gallons: gal, ppg, total: gal * ppg, card: '••' + int(1000, 9999) }; });
+const SERVICES = ['PM-A service', 'PM-B service', 'Tire replacement', 'Brake adjustment', 'Annual DOT inspection', 'Oil change'];
+const maintenance = Array.from({ length: 12 }, (_, i) => ({ id: 801 + i, truckId: trucks[int(0, 17)].id, type: pick(SERVICES), date: addDays(TODAY, i < 5 ? int(1, 25) : -int(3, 120)), shop: pick(['Lone Star Truck Center', 'Interstate Diesel Repair', 'In-house shop']), cost: i < 5 ? 0 : int(180, 2400), status: i < 5 ? 'Scheduled' : 'Completed' }));
+const DOC_TYPES = ['Rate confirmation', 'Bill of lading', 'Proof of delivery', 'Lumper receipt', 'CDL', 'Medical card', 'Insurance certificate', 'Truck registration'];
+const documents = Array.from({ length: 16 }, (_, i) => { const type = DOC_TYPES[i % DOC_TYPES.length], l = loads[i * 2];
+  return { id: 901 + i, type, name: `${slug(type)}_${i < 4 || i > 7 ? l.id : drivers[i].last.toLowerCase()}.pdf`, related: i % 8 < 4 ? `Load ${l.id}` : i % 8 < 6 ? `${drivers[i].first} ${drivers[i].last}` : `Truck ${trucks[i].unit}`, uploaded: addDays(TODAY, -int(0, 40)), by: pick(['Dana Whitfield', 'Chris Alvarez', 'Driver app']) }; });
+const users = [['Dana Whitfield', 'dana@haulr-demo.example', 'Admin'], ['Chris Alvarez', 'chris@haulr-demo.example', 'Dispatcher'], ['Megan Cho', 'megan@haulr-demo.example', 'Dispatcher'], ['Paul Okafor', 'paul@haulr-demo.example', 'Accountant'], ['Marcus Reed', 'mreed@haulr-demo.example', 'Driver'], ['Tanya Brooks', 'tbrooks@haulr-demo.example', 'Driver']]
+  .map(([name, email, role], i) => ({ id: i + 1, name, email, role, status: 'Active', last: i < 4 ? 'Today' : fmtS(addDays(TODAY, -i)) }));
+const notifications = [['CDL for Marcus Reed expires in 12 days', '2h ago'], ['Load 1037 delivered — POD uploaded by driver', '3h ago'], ['Invoice INV-5010 is overdue', 'Yesterday'], ['Truck 116 is in the shop: brake adjustment', 'Yesterday'], ['New rate confirmation from Summit Freight Brokerage', 'Oct 13']]
+  .map(([text, when], i) => ({ text, when, unread: i < 3 }));
+const integrations = [{ key: 'eld', name: 'ELD / Telematics', desc: 'Sync hours of service, GPS location and mileage from your ELD provider.' }, { key: 'factoring', name: 'Factoring', desc: 'Send invoices and documents to your factoring company in one click.' },
+  { key: 'accounting', name: 'Accounting', desc: 'Export invoices, payments and driver settlements to your accounting software.' }, { key: 'loadboard', name: 'Load boards', desc: 'Post trucks and import loads from load boards.', connected: true },
+  { key: 'fuelcard', name: 'Fuel cards', desc: 'Import fuel card transactions for IFTA and driver deductions.' }];
+const company = { name: 'Haulr Demo Freight LLC', dot: '3489217', mc: 'MC-1204563', address: '4120 Distribution Way', city: 'Dallas', state: 'TX', zip: '75247', phone: '(214) 555-0187', email: 'office@haulr-demo.example', tz: 'Central Time (CT)', terms: 'Net 30' };
+const plan = { name: 'Fleet 25', price: 499, next: new Date(2026, 10, 1), trucks: 25, users: 10 };
+const REV_WEEKS = [38.2, 41.5, 36.9, 44.1, 47.3, 42.8, 49.6, 45.2];
+
+const S = { loads: { status: 'all', q: '', customer: '', equip: '', from: '', page: 1, per: 40, sel: new Set(), hide: new Set() }, drivers: { q: '', status: '' }, inv: { q: '', status: '' }, docs: { type: '' },
+  tabs: {}, week: 0, navOpen: {}, report: 'customer', reportRange: '30', lastLoad: null, lastDriver: null };
+window.__haulr = { S, loads, drivers, trucks, invoices, customers, settlements }; // for test scripts
+
+const cust = id => customers.find(c => c.id === +id);
+const drv = id => drivers.find(d => d.id === +id);
+const trk = id => trucks.find(t => t.id === +id);
+const trl = id => trailers.find(t => t.id === +id);
+const loadById = id => loads.find(l => l.id === +id);
+const invById = id => invoices.find(i => i.id === +id);
+const dname = d => d ? `${d.first} ${d.last}` : '';
+const nextId = (arr, base) => arr.reduce((m, x) => Math.max(m, x.id), base) + 1;
+const driverStatus = d => d.offDuty ? 'Off duty' : loads.some(l => l.driverId === d.id && (l.status === 'in_transit' || l.status === 'dispatched')) ? 'On load' : 'Available';
+const truckDriver = t => drivers.find(d => d.truckId === t.id);
+const ST = { available: ['Available', 'gray'], dispatched: ['Dispatched', 'blue'], in_transit: ['In Transit', 'amber'], delivered: ['Delivered', 'green'], invoiced: ['Invoiced', 'violet'] };
+const TONE = { Paid: 'green', Sent: 'blue', Draft: 'gray', Overdue: 'red', Factored: 'violet', Void: 'gray', Approved: 'blue', 'In shop': 'red', Active: 'green', Available: 'green', 'On load': 'blue', 'Off duty': 'gray', Pending: 'amber', Scheduled: 'blue', Completed: 'green', 'On hold': 'red', Connected: 'green', Broker: 'blue', Shipper: 'violet', 'In use': 'blue' };
+const badge = (t, tone) => `<span class="badge ${tone || TONE[t] || 'gray'}">${esc(t)}</span>`;
+const lbadge = s => badge(ST[s][0], ST[s][1]);
+const payText = d => d.payType === 'Per mile' ? `$${d.payRate.toFixed(2)} / mile` : d.payType === 'Percentage' ? `${d.payRate}% of line haul` : `$${d.payRate} / hour`;
+
+// ================= network: the only place that calls fetch =================
+async function write(action, data) {
+  const r = await fetch('/api/tms/write', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...data }) });
+  if (r.status === 403) throw new Error("You don't have permission to do that (403)");
+  if (!r.ok) throw new Error('Server error ' + r.status);
+  return r.json().catch(() => ({}));
+}
+/** POST the write, then apply it to memory and toast. On a 403 or network error: error toast, nothing applied, caller keeps its dialog open. */
+async function commit(btn, action, data, apply, okMsg) {
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
+  try { await write(action, data); }
+  catch (e) { toast(`Couldn't complete the action. ${e && e.message && !/fetch/i.test(e.message) ? e.message : 'Check your connection and try again.'}`, 'error'); return false; }
+  finally { if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); } }
+  if (apply) apply();
+  if (okMsg) toast(typeof okMsg === 'function' ? okMsg() : okMsg);
+  return true;
+}
+function toast(msg, kind = 'success') {
+  const t = document.createElement('div'); t.className = 'toast ' + kind;
+  t.innerHTML = `<span>${esc(msg)}</span><button type="button" class="icon-btn" aria-label="Dismiss notification">${ic('x', 15)}</button>`;
+  t.querySelector('button').onclick = () => t.remove();
+  $('#toasts').appendChild(t); setTimeout(() => t.remove(), kind === 'error' ? 7000 : 4500);
+}
+
+// ================= floating layer: menus and popovers =================
+let open = null;
+function closeFloating() { if (!open) return; open.el.remove(); open.trigger && open.trigger.setAttribute('aria-expanded', 'false'); open = null; }
+function showFloating(trigger, html, { align = 'right', focus = true } = {}) {
+  closeFloating();
+  const el = document.createElement('div'); el.innerHTML = html; const node = el.firstElementChild; $('#layer').appendChild(node);
+  const r0 = trigger.getBoundingClientRect(); if (r0.bottom > window.innerHeight || r0.top < 0) trigger.scrollIntoView({ block: 'nearest' });
+  const r = trigger.getBoundingClientRect(), w = node.offsetWidth, h = node.offsetHeight;
+  node.style.left = Math.max(8, Math.min(window.innerWidth - w - 8, align === 'right' ? r.right - w : r.left)) + 'px';
+  node.style.top = (r.bottom + 6 + h > window.innerHeight && r.top - h - 6 > 0 ? r.top - h - 6 : r.bottom + 6) + 'px';
+  trigger.setAttribute('aria-expanded', 'true'); open = { trigger, el: node, at: Date.now() };
+  if (focus) { const f = node.querySelector('[role=menuitem]:not([aria-disabled=true])'); f && f.focus({ preventScroll: true }); }
+  return node;
+}
+const MENUS = {
+  new: () => `<ul class="menu" role="menu" aria-label="Create new"><li role="none"><a role="menuitem" href="#/loads/new">New Load</a></li><li role="none"><button type="button" role="menuitem" data-act="new-driver">New Driver</button></li>
+    <li role="none"><button type="button" role="menuitem" data-act="new-truck">New Truck</button></li><li role="none"><button type="button" role="menuitem" data-act="new-customer">New Customer</button></li>
+    <li role="none"><button type="button" role="menuitem" data-act="new-invoice">New Invoice</button></li></ul>`,
+  user: () => `<ul class="menu" role="menu" aria-label="Account"><li role="none" class="muted sm" style="padding:6px 10px">dana@haulr-demo.example</li><li role="none"><a role="menuitem" href="#/profile">Profile</a></li>
+    <li role="none"><a role="menuitem" href="#/settings">Company settings</a></li><li role="separator"></li><li role="none"><button type="button" role="menuitem" data-act="logout">Log out</button></li></ul>`,
+  load: id => `<ul class="menu" role="menu" aria-label="Load ${id} actions"><li role="none"><a role="menuitem" href="#/loads/${id}">View</a></li><li role="none"><a role="menuitem" href="#/loads/${id}/edit">Edit</a></li>
+    <li role="none"><button type="button" role="menuitem" data-act="load-dup" data-id="${id}">Duplicate</button></li><li role="separator"></li><li role="none"><button type="button" role="menuitem" class="danger" data-act="load-del" data-id="${id}">Delete</button></li></ul>`,
+  loadMore: id => `<ul class="menu" role="menu" aria-label="More actions for load ${id}"><li role="none"><button type="button" role="menuitem" data-act="load-dup" data-id="${id}">Duplicate</button></li>
+    <li role="none"><button type="button" role="menuitem" data-act="upload" data-load="${id}">Upload document</button></li><li role="separator"></li><li role="none"><button type="button" role="menuitem" class="danger" data-act="load-del" data-id="${id}">Delete</button></li></ul>`,
+  // Built from divs, as some apps do.
+  invoice: id => { const v = invById(id), done = v.status === 'Paid' || v.status === 'Factored' || v.status === 'Void';
+    return `<div class="menu" role="menu" aria-label="Invoice INV-${id} actions"><div role="menuitem" tabindex="-1" data-act="inv-view" data-id="${id}">View invoice</div>
+    <div role="menuitem" tabindex="-1" data-act="inv-paid" data-id="${id}" aria-disabled="${done}">Mark as paid</div><div role="menuitem" tabindex="-1" data-act="inv-factor" data-id="${id}" aria-disabled="${done}">Send to factoring</div>
+    <div role="separator"></div><div role="menuitem" tabindex="-1" class="danger" data-act="inv-void" data-id="${id}" aria-disabled="${v.status === 'Void' || v.status === 'Paid'}">Void invoice</div></div>`; },
+};
+function bellHtml() {
+  const unread = notifications.filter(n => n.unread).length;
+  return `<div class="popover" role="dialog" aria-label="Notifications"><div class="pop-head"><h2 style="margin:0">Notifications</h2><span class="muted sm">${unread} unread</span></div>
+    <ul class="notif">${notifications.map(n => `<li class="${n.unread ? 'unread' : ''}">${esc(n.text)}<div class="muted sm">${n.when}</div></li>`).join('')}</ul>
+    <div class="pop-foot"><button type="button" class="btn sm" data-act="mark-read" ${unread ? '' : 'disabled'}>Mark all as read</button></div></div>`;
+}
+function renderBell() { const n = notifications.filter(x => x.unread).length; $('#bell').innerHTML = ic('bell', 19) + (n ? `<span class="count" aria-hidden="true">${n}</span>` : ''); $('#bell').setAttribute('aria-label', n ? `Notifications, ${n} unread` : 'Notifications'); }
+
+// ================= dialogs: native <dialog>, div[role=dialog], and a right-side drawer =================
+const stack = [];
+function openModal({ title, body, footer, kind = 'native', size = '' }) {
+  const id = 'dlg' + (++uid), opener = document.activeElement;
+  const inner = `<form class="modal-form" novalidate><div class="modal-head"><h2 id="${id}-t">${esc(title)}</h2><button type="button" class="icon-btn" aria-label="Close" data-act="dlg-close">${ic('x')}</button></div>
+    <div class="modal-body">${body}</div><div class="modal-foot">${footer}</div></form>`;
+  let root, el;
+  if (kind === 'native') { root = el = document.createElement('dialog'); el.className = 'modal ' + size; el.setAttribute('aria-labelledby', id + '-t'); el.innerHTML = inner; document.body.appendChild(el); el.showModal(); }
+  else if (kind === 'drawer') { root = document.createElement('div'); root.className = 'drawer-wrap'; root.innerHTML = `<div class="drawer-backdrop" data-act="dlg-close"></div><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="${id}-t">${inner}</aside>`; document.body.appendChild(root); el = root.lastElementChild; }
+  else { root = document.createElement('div'); root.className = 'overlay'; root.innerHTML = `<div class="modal ${size}" role="dialog" aria-modal="true" aria-labelledby="${id}-t">${inner}</div>`; document.body.appendChild(root); el = root.firstElementChild; }
+  const rec = { el, root, kind, form: el.querySelector('form'), close() { root.remove(); const i = stack.indexOf(rec); if (i >= 0) stack.splice(i, 1); if (opener && opener.isConnected) opener.focus({ preventScroll: true }); } };
+  if (kind === 'native') el.addEventListener('cancel', e => { e.preventDefault(); rec.close(); });
+  if (kind === 'div') root.addEventListener('mousedown', e => { if (e.target === root) rec.close(); });
+  stack.push(rec);
+  const f = el.querySelector('.modal-body input:not([type=hidden]), .modal-body select, .modal-body textarea'); f && f.focus({ preventScroll: true });
+  return rec;
+}
+const opt = o => Array.isArray(o) ? o : [o, o];
+function fieldHtml(f) {
+  const id = f.id || `f-${f.name}-${++uid}`, req = f.required ? ' required aria-required="true"' : '', v = f.value == null ? '' : f.value;
+  if (f.type === 'checkbox') return `<div class="field check"><input type="checkbox" id="${id}" name="${f.name}" ${f.value ? 'checked' : ''}><label for="${id}">${esc(f.label)}</label></div>`;
+  let ctl;
+  if (f.type === 'select') ctl = `<select id="${id}" name="${f.name}"${req}>${f.placeholder === false ? '' : `<option value="">${esc(f.placeholder || 'Select…')}</option>`}${f.options.map(o => { const [val, lab] = opt(o); return `<option value="${esc(val)}" ${String(val) === String(v) ? 'selected' : ''}>${esc(lab)}</option>`; }).join('')}</select>`;
+  else if (f.type === 'textarea') ctl = `<textarea id="${id}" name="${f.name}" placeholder="${esc(f.placeholder || '')}"${req}>${esc(v)}</textarea>`;
+  else ctl = `<input id="${id}" name="${f.name}" type="${f.type || 'text'}" value="${esc(v)}" placeholder="${esc(f.placeholder || '')}"${f.step ? ` step="${f.step}"` : ''}${f.min != null ? ` min="${f.min}"` : ''}${req}>`;
+  return `<div class="field${f.cls ? ' ' + f.cls : ''}"><label for="${id}">${esc(f.label)}${f.required ? ' <span class="req" aria-hidden="true">*</span>' : ''}</label>${ctl}${f.hint ? `<small class="hint">${esc(f.hint)}</small>` : ''}<small class="err" hidden></small></div>`;
+}
+const readForm = form => { const o = {}; new FormData(form).forEach((v, k) => { if (!(v instanceof File)) o[k] = v; else if (v.name) o[k] = v.name; }); return o; };
+function validate(form) {
+  let first = null;
+  $$('[required]', form).forEach(el => { const box = el.closest('.field') || el.closest('.cselect'), err = box && box.querySelector('.err');
+    const bad = !String(el.value).trim() || (el.type === 'email' && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(el.value)) || (el.type === 'number' && el.min !== '' && +el.value < +el.min);
+    const shown = el.type === 'hidden' ? box && box.querySelector('.cselect-btn') : el;
+    if (shown) shown.setAttribute('aria-invalid', String(bad));
+    if (err) { err.hidden = !bad; err.textContent = bad ? (String(el.value).trim() ? 'Enter a valid value' : 'This field is required') : ''; }
+    if (bad && !first) first = shown; });
+  if (first) first.focus();
+  return !first;
+}
+/** A modal form whose submit commits one write. */
+function formDialog({ title, fields, submit, action, kind = 'native', size = '', intro = '', extra = '', build, apply, okMsg }) {
+  const d = openModal({ title, kind, size, body: intro + fields.map(fieldHtml).join('') + extra, footer: `<button type="button" class="btn" data-act="dlg-close">Cancel</button><button type="submit" class="btn primary">${esc(submit)}</button>` });
+  fields.forEach(f => { if (f.onchange) d.form.elements[f.name].addEventListener('change', e => f.onchange(d.form, e.target.value)); });
+  d.form.addEventListener('submit', async e => {
+    e.preventDefault(); if (!validate(d.form)) return;
+    const data = readForm(d.form), payload = build ? build(data) : data;
+    const ok = await commit(d.form.querySelector('[type=submit]'), action, payload, () => apply && apply(payload, data), okMsg && (() => okMsg(payload, data)));
+    if (ok) { d.close(); render(); }
+  });
+  return d;
+}
+function confirmDialog({ title, message, confirm, action, data, apply, okMsg }) {
+  const d = openModal({ title, kind: 'native', body: `<p>${esc(message)}</p><p class="muted sm">This can't be undone.</p>`, footer: `<button type="button" class="btn" data-act="dlg-close">Cancel</button><button type="submit" class="btn danger">${esc(confirm)}</button>` });
+  d.el.setAttribute('role', 'alertdialog');
+  d.form.addEventListener('submit', async e => { e.preventDefault(); if (await commit(d.form.querySelector('[type=submit]'), action, data, apply, okMsg)) { d.close(); render(); } });
+  d.form.querySelector('[data-act=dlg-close]').focus();
+}
+
+// ---- specific dialogs ----
+function dispatchDialog(id) {
+  const l = loadById(id); if (!l) return;
+  formDialog({ title: `Dispatch load ${l.id}`, submit: 'Dispatch load', action: 'dispatch_load',
+    intro: `<p class="muted">${esc(place(l.o))} → ${esc(place(l.d))} · ${fmtS(l.pu)} · ${l.equip} · ${money(l.rate)}</p>`,
+    fields: [
+      { name: 'driverId', label: 'Assign driver', type: 'select', required: true, value: l.driverId, placeholder: 'Select a driver', options: drivers.map(d => [d.id, `${dname(d)} — ${driverStatus(d)}`]),
+        onchange: (form, v) => { const d = drv(v); if (d && d.truckId) form.elements.truckId.value = d.truckId; } },
+      { name: 'truckId', label: 'Truck', type: 'select', required: true, value: l.truckId, placeholder: 'Select a truck', options: trucks.map(t => [t.id, `Unit ${t.unit} · ${t.make} ${t.model}${t.status === 'In shop' ? ' (in shop)' : ''}`]) },
+      { name: 'trailerId', label: 'Trailer', type: 'select', value: l.trailerId, placeholder: 'Select a trailer', options: trailers.map(t => [t.id, `${t.unit} · ${t.type}`]) },
+      { name: 'notify', label: 'Send load details to the driver app', type: 'checkbox', value: true }],
+    build: d => ({ loadId: l.id, driverId: +d.driverId, truckId: +d.truckId, trailerId: d.trailerId ? +d.trailerId : null, notify: !!d.notify }),
+    apply: p => { Object.assign(l, { driverId: p.driverId, truckId: p.truckId, trailerId: p.trailerId }); if (l.status === 'available') l.status = 'dispatched'; l.history.push([TODAY, `Dispatched to ${dname(drv(p.driverId))}`]); },
+    okMsg: p => `Load ${l.id} dispatched to ${dname(drv(p.driverId))}` });
+}
+function invoiceDialog(loadId) {
+  const ready = loads.filter(l => l.status === 'delivered' || l.id === +loadId);
+  formDialog({ title: 'Create invoice', kind: 'div', submit: 'Create invoice', action: 'create_invoice',
+    fields: [{ name: 'loadId', label: 'Load', type: 'select', required: true, value: loadId || '', placeholder: 'Select a delivered load', options: ready.map(l => [l.id, `${l.id} · ${cust(l.customerId).name} · ${money(l.rate + l.fsc + l.detention)}`]) },
+      { name: 'date', label: 'Invoice date', type: 'date', required: true, value: iso(TODAY) },
+      { name: 'terms', label: 'Payment terms', type: 'select', required: true, value: 'Net 30', placeholder: false, options: ['Net 15', 'Net 30', 'Quick Pay'] },
+      { name: 'memo', label: 'Memo (optional)', type: 'textarea', placeholder: 'Shown on the invoice' }],
+    build: d => { const l = loadById(d.loadId); return { loadId: l.id, customerId: l.customerId, date: d.date, terms: d.terms, amount: l.rate + l.fsc + l.detention, memo: d.memo }; },
+    apply: p => { const issued = parseIso(p.date) || TODAY; const id = nextId(invoices, 5000); invoices.push({ id, loadId: p.loadId, customerId: p.customerId, issued, due: addDays(issued, { 'Net 15': 15, 'Net 30': 30, 'Quick Pay': 2 }[p.terms]), terms: p.terms, amount: p.amount, status: 'Sent' });
+      const l = loadById(p.loadId); l.status = 'invoiced'; l.history.push([TODAY, `Invoice INV-${id} created`]); p.id = id; },
+    okMsg: p => `Invoice INV-${p.id} created for load ${p.loadId}` });
+}
+function driverDrawer(id) {
+  const d = drv(id) || {};
+  formDialog({ title: id ? `Edit driver: ${dname(d)}` : 'Add driver', kind: 'drawer', submit: 'Save driver', action: id ? 'update_driver' : 'create_driver',
+    fields: [{ name: 'first', label: 'First name', required: true, value: d.first, cls: 'half' }, { name: 'last', label: 'Last name', required: true, value: d.last },
+      { name: 'phone', label: 'Phone', type: 'tel', required: true, value: d.phone, placeholder: '(214) 555-0100' }, { name: 'email', label: 'Email', type: 'email', value: d.email, placeholder: 'name@example.com' },
+      { name: 'cdl', label: 'CDL number', required: true, value: d.cdl }, { name: 'cdlExp', label: 'CDL expiry', type: 'date', required: true, value: d.cdlExp ? iso(d.cdlExp) : '' },
+      { name: 'payType', label: 'Pay type', type: 'select', required: true, value: d.payType || 'Per mile', placeholder: false, options: ['Per mile', 'Percentage', 'Hourly'] },
+      { name: 'payRate', label: 'Pay rate', type: 'number', step: '0.01', min: 0, value: d.payRate, hint: '$ per mile, % of line haul, or $ per hour' },
+      { name: 'truckId', label: 'Assigned truck', type: 'select', value: d.truckId, placeholder: 'No truck', options: trucks.map(t => [t.id, 'Unit ' + t.unit]) }],
+    build: x => ({ ...(id ? { id } : {}), ...x }),
+    apply: x => { const rec = id ? d : { id: nextId(drivers, 0), hired: TODAY, home: 'Dallas, TX', medExp: addDays(TODAY, 365) };
+      Object.assign(rec, { first: x.first, last: x.last, phone: x.phone, email: x.email, cdl: x.cdl, cdlExp: parseIso(x.cdlExp), payType: x.payType, payRate: +x.payRate || 0, truckId: x.truckId ? +x.truckId : null }); if (!id) drivers.push(rec); x.name = dname(rec); },
+    okMsg: x => id ? `Driver ${x.name} updated` : `Driver ${x.name} added` });
+}
+function simpleCreate(kind) {
+  const C = {
+    truck: { title: 'Add truck', submit: 'Save truck', action: 'create_truck', native: true, fields: [{ name: 'unit', label: 'Unit #', required: true, value: String(nextId(trucks, 0) + 100) }, { name: 'make', label: 'Make', type: 'select', required: true, options: ['Freightliner', 'Volvo', 'Kenworth', 'Peterbilt', 'International', 'Mack'] }, { name: 'model', label: 'Model' }, { name: 'year', label: 'Year', type: 'number', min: 1990, value: 2025 }, { name: 'vin', label: 'VIN', required: true }, { name: 'plate', label: 'License plate' }],
+      apply: x => trucks.push({ id: nextId(trucks, 0), unit: x.unit, make: x.make, model: x.model, year: +x.year, vin: x.vin, plate: x.plate, odometer: 0, nextPm: addDays(TODAY, 90), status: 'Active' }), msg: x => `Truck ${x.unit} added` },
+    trailer: { title: 'Add trailer', submit: 'Save trailer', action: 'create_trailer', fields: [{ name: 'unit', label: 'Trailer #', required: true, value: 'T-' + (nextId(trailers, 0) + 200) }, { name: 'type', label: 'Type', type: 'select', required: true, options: EQUIP }, { name: 'year', label: 'Year', type: 'number', value: 2024 }, { name: 'plate', label: 'License plate' }],
+      apply: x => trailers.push({ id: nextId(trailers, 0), unit: x.unit, type: x.type, year: +x.year, plate: x.plate, status: 'Available' }), msg: x => `Trailer ${x.unit} added` },
+    customer: { title: 'Add customer', submit: 'Save customer', action: 'create_customer', fields: [{ name: 'name', label: 'Company name', required: true }, { name: 'type', label: 'Type', type: 'select', required: true, options: ['Broker', 'Shipper'] }, { name: 'mc', label: 'MC number', placeholder: 'MC-000000' }, { name: 'contact', label: 'Contact name' }, { name: 'email', label: 'Billing email', type: 'email' }, { name: 'phone', label: 'Phone', type: 'tel' }, { name: 'terms', label: 'Payment terms', type: 'select', value: 'Net 30', placeholder: false, options: ['Net 15', 'Net 30', 'Quick Pay'] }],
+      apply: x => customers.push({ id: nextId(customers, 0), name: x.name, type: x.type, mc: x.mc || '—', contact: x.contact, phone: x.phone, email: x.email, terms: x.terms, credit: 'Approved', city: CITIES[0] }), msg: x => `Customer ${x.name} added` },
+    upload: { title: 'Upload document', submit: 'Upload', action: 'upload_document', fields: [{ name: 'type', label: 'Document type', type: 'select', required: true, options: DOC_TYPES }, { name: 'loadId', label: 'Related load', type: 'select', options: loads.map(l => [l.id, 'Load ' + l.id]) }, { name: 'file', label: 'File', type: 'file', required: true, hint: 'PDF, JPG or PNG up to 20 MB' }],
+      apply: x => documents.unshift({ id: nextId(documents, 900), type: x.type, name: x.file || 'document.pdf', related: x.loadId ? 'Load ' + x.loadId : '—', uploaded: TODAY, by: 'Dana Whitfield' }), msg: x => `${x.type} uploaded` },
+    fuel: { title: 'Log fuel purchase', submit: 'Save purchase', action: 'log_fuel', native: true, fields: [{ name: 'truckId', label: 'Truck', type: 'select', required: true, options: trucks.map(t => [t.id, 'Unit ' + t.unit]) }, { name: 'date', label: 'Date', type: 'date', required: true, value: iso(TODAY) }, { name: 'state', label: 'State', type: 'select', required: true, options: [...new Set(CITIES.map(c => c[1]))].sort() }, { name: 'gallons', label: 'Gallons', type: 'number', step: '0.1', min: 1, required: true }, { name: 'ppg', label: 'Price per gallon ($)', type: 'number', step: '0.001', min: 0, required: true }],
+      apply: x => fuel.unshift({ date: parseIso(x.date), truckId: +x.truckId, driverId: (truckDriver(trk(x.truckId)) || drivers[0]).id, where: x.state, state: x.state, gallons: +x.gallons, ppg: +x.ppg, total: x.gallons * x.ppg, card: 'Manual' }), msg: () => 'Fuel purchase saved' },
+    service: { title: 'Schedule service', submit: 'Schedule service', action: 'schedule_service', fields: [{ name: 'truckId', label: 'Truck', type: 'select', required: true, options: trucks.map(t => [t.id, 'Unit ' + t.unit]) }, { name: 'type', label: 'Service type', type: 'select', required: true, options: SERVICES }, { name: 'date', label: 'Date', type: 'date', required: true, value: iso(addDays(TODAY, 3)) }, { name: 'shop', label: 'Shop / vendor', value: 'In-house shop' }, { name: 'notes', label: 'Notes', type: 'textarea' }],
+      apply: x => maintenance.unshift({ id: nextId(maintenance, 800), truckId: +x.truckId, type: x.type, date: parseIso(x.date), shop: x.shop, cost: 0, status: 'Scheduled' }), msg: x => `${x.type} scheduled for unit ${trk(x.truckId).unit}` },
+    invite: { title: 'Invite user', submit: 'Send invite', action: 'invite_user', native: true, fields: [{ name: 'email', label: 'Email address', type: 'email', required: true, placeholder: 'name@company.com' }, { name: 'role', label: 'Role', type: 'select', required: true, options: ['Admin', 'Dispatcher', 'Accountant', 'Driver'] }, { name: 'message', label: 'Personal message (optional)', type: 'textarea' }],
+      apply: x => users.push({ id: nextId(users, 0), name: x.email.split('@')[0], email: x.email, role: x.role, status: 'Pending', last: '—' }), msg: x => `Invite sent to ${x.email}` },
+  }[kind];
+  return (preset = {}) => formDialog({ title: C.title, submit: C.submit, action: C.action, kind: C.native ? 'native' : 'div', fields: C.fields.map(f => f.name in preset ? { ...f, value: preset[f.name] } : f), apply: C.apply, okMsg: C.msg });
+}
+function planDialog() {
+  const plans = [['Starter 10', '$249 / month · up to 10 trucks'], ['Fleet 25', '$499 / month · up to 25 trucks'], ['Fleet 50', '$899 / month · up to 50 trucks'], ['Enterprise', 'Custom pricing · unlimited trucks']];
+  const d = openModal({ title: 'Change plan', kind: 'native', body: `<fieldset><legend class="lbl-text">Choose a plan</legend><div class="plans">${plans.map(([n, t]) => `<label><input type="radio" name="plan" value="${n}" ${n === plan.name ? 'checked' : ''}><span><b>${n}</b><br><span class="muted sm">${t}</span></span></label>`).join('')}</div></fieldset><p class="muted sm">Changes take effect on your next billing date (${fmtD(plan.next)}).</p>`,
+    footer: `<button type="button" class="btn" data-act="dlg-close">Cancel</button><button type="submit" class="btn primary">Confirm plan change</button>` });
+  d.form.addEventListener('submit', async e => { e.preventDefault(); const p = readForm(d.form).plan; if (await commit(d.form.querySelector('[type=submit]'), 'change_plan', { plan: p }, () => { plan.name = p; }, `Plan changed to ${p}`)) { d.close(); render(); } });
+}
+function settlementWizard() {
+  const w = { step: 1, driverId: '', period: '' };
+  const periods = [0, 1, 2, 3].map(k => { const s = addDays(new Date(2026, 9, 5), -7 * k); return [iso(s), `${fmtS(s)} – ${fmtD(addDays(s, 6))}`]; });
+  const d = openModal({ title: 'New settlement', kind: 'div', size: 'lg', body: '<div id="wiz"></div>',
+    footer: `<button type="button" class="btn" data-w="back">Back</button><span class="grow"></span><button type="button" class="btn" data-act="dlg-close">Cancel</button><button type="button" class="btn primary" data-w="next">Next</button><button type="submit" class="btn primary" hidden>Create settlement</button>` });
+  const calc = () => { const dr = drv(w.driverId), s = parseIso(w.period), e = addDays(s, 6);
+    let ls = loads.filter(l => l.driverId === dr.id && l.del >= s && l.del <= e); if (!ls.length) ls = loads.filter(l => l.driverId === dr.id).slice(0, 2);
+    const lines = ls.map(l => [l, dr.payType === 'Per mile' ? l.miles * dr.payRate : dr.payType === 'Percentage' ? l.rate * dr.payRate / 100 : 11 * Math.max(1, (l.del - l.pu) / 864e5) * dr.payRate]);
+    const gross = lines.reduce((a, x) => a + x[1], 0), ded = [['Fuel advance', 150], ['Occupational accident insurance', 42.5], ['ELD fee', 15]], dsum = ded.reduce((a, x) => a + x[1], 0);
+    return { dr, s, e, lines, gross, ded, dsum, net: gross - dsum }; };
+  const draw = () => {
+    const box = $('#wiz', d.el), steps = ['Driver', 'Pay period', 'Review'];
+    let html = `<ol class="steps">${steps.map((t, i) => `<li ${i + 1 === w.step ? 'aria-current="step"' : ''}>${i + 1}. ${t}</li>`).join('')}</ol><p class="muted sm">Step ${w.step} of 3</p>`;
+    if (w.step === 1) html += fieldHtml({ name: 'driverId', label: 'Driver', type: 'select', required: true, value: w.driverId, placeholder: 'Select a driver', options: drivers.map(x => [x.id, `${dname(x)} · ${x.payType}`]) });
+    if (w.step === 2) html += fieldHtml({ name: 'period', label: 'Pay period', type: 'select', required: true, value: w.period, placeholder: 'Select a pay period', options: periods });
+    if (w.step === 3) { const c = calc();
+      html += `<dl class="facts" style="margin-bottom:14px"><div><dt>Driver</dt><dd>${esc(dname(c.dr))}</dd></div><div><dt>Period</dt><dd>${fmtS(c.s)} – ${fmtD(c.e)}</dd></div><div><dt>Pay type</dt><dd>${esc(payText(c.dr))}</dd></div></dl>
+        <table><thead><tr><th>Load</th><th>Route</th><th class="num">Miles</th><th class="num">Pay</th></tr></thead><tbody>${c.lines.map(([l, p]) => `<tr><td>${l.id}</td><td>${esc(place(l.o))} → ${esc(place(l.d))}</td><td class="num">${l.miles}</td><td class="num">${money(p)}</td></tr>`).join('')}
+        ${c.ded.map(([t, v]) => `<tr><td colspan="3">${t}</td><td class="num">−${money(v)}</td></tr>`).join('')}<tr><th colspan="3">Net pay</th><th class="num">${money(c.net)}</th></tr></tbody></table>`; }
+    box.innerHTML = html;
+    $('[data-w=back]', d.el).hidden = w.step === 1; $('[data-w=next]', d.el).hidden = w.step === 3; $('[type=submit]', d.el).hidden = w.step !== 3;
+    const f = $('select', box); f && f.focus();
+  };
+  d.el.addEventListener('click', e => { const b = e.target.closest('[data-w]'); if (!b) return;
+    if (b.dataset.w === 'back') { w.step--; return draw(); }
+    if (!validate(d.form)) return; const v = readForm(d.form); if (w.step === 1) w.driverId = v.driverId; if (w.step === 2) w.period = v.period; w.step++; draw(); });
+  d.form.addEventListener('submit', async e => { e.preventDefault(); const c = calc();
+    const payload = { driverId: c.dr.id, periodStart: iso(c.s), periodEnd: iso(c.e), loadIds: c.lines.map(x => x[0].id), gross: +c.gross.toFixed(2), deductions: c.dsum, net: +c.net.toFixed(2) };
+    if (await commit($('[type=submit]', d.el), 'create_settlement', payload, () => settlements.unshift({ id: nextId(settlements, 300), driverId: c.dr.id, start: c.s, end: c.e, loads: c.lines.length, gross: c.gross, deductions: c.dsum, net: c.net, status: 'Draft' }), `Settlement created for ${dname(c.dr)}`)) { d.close(); render(); } });
+  draw();
+}
+
+// ================= page helpers =================
+const head = (title, sub, actions = '', crumbs = '') => `${crumbs ? `<nav class="crumbs" aria-label="Breadcrumb">${crumbs}</nav>` : ''}<div class="page-head"><div><h1>${title}</h1>${sub ? `<p class="muted">${sub}</p>` : ''}</div><div class="actions">${actions}</div></div>`;
+const kpi = (label, value, sub = '') => `<div class="kpi"><div class="kpi-label">${label}</div><div class="kpi-value">${value}</div>${sub ? `<div class="kpi-sub">${sub}</div>` : ''}</div>`;
+const facts = pairs => `<dl class="facts">${pairs.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('')}</dl>`;
+const tabsHtml = (group, list, label) => { const a = S.tabs[group] || list[0][0];
+  return `<div class="tabs" role="tablist" aria-label="${label}">${list.map(([k, t]) => `<button type="button" role="tab" id="tab-${group}-${k}" aria-selected="${k === a}" aria-controls="panel-${group}" tabindex="${k === a ? 0 : -1}" data-act="tab" data-group="${group}" data-tab="${k}">${t}</button>`).join('')}</div>`; };
+const panel = (group, html) => `<div role="tabpanel" id="panel-${group}" aria-labelledby="tab-${group}-${S.tabs[group]}">${html}</div>`;
+const tableHtml = (cols, rows, empty = 'Nothing here yet.') => `<table><thead><tr>${cols.map(c => `<th${/^(Miles|Rate|Amount|Gross|Net|Total|Gallons|Cost|Balance|Revenue|Deductions|Tax|Loads|RPM|\$)/.test(c) ? ' class="num"' : ''} scope="col">${c}</th>`).join('')}</tr></thead><tbody>${rows.length ? rows.join('') : `<tr><td colspan="${cols.length}" class="muted">${empty}</td></tr>`}</tbody></table>`;
+const tr = cells => `<tr>${cells.map(c => Array.isArray(c) ? `<td class="${c[1]}">${c[0]}</td>` : `<td>${c}</td>`).join('')}</tr>`;
+const dlink = d => d ? `<a href="#/drivers/${d.id}">${esc(dname(d))}</a>` : '<span class="muted">Unassigned</span>';
+const llink = id => `<a href="#/loads/${id}">${id}</a>`;
+const route = l => `${esc(place(l.o))} → ${esc(place(l.d))}`;
+const notFound = what => ({ title: 'Not found', html: head(`${what} not found`, `It may have been deleted. <a href="#/">Go to the dashboard</a>.`) });
+const weekStart = off => { const d = addDays(TODAY, -((TODAY.getDay() + 6) % 7)); return addDays(d, 7 * off); };
+
+// ================= pages =================
+function pDashboard() {
+  const ws = weekStart(0), we = addDays(ws, 6), rev = loads.filter(l => l.del >= ws && l.del <= we).reduce((a, l) => a + l.rate, 0) || REV_WEEKS[7] * 1000;
+  const open = invoices.filter(i => i.status === 'Sent' || i.status === 'Overdue'), max = Math.max(...REV_WEEKS);
+  const avail = loads.filter(l => l.status === 'available'), transit = loads.filter(l => l.status === 'in_transit');
+  const alerts = [...drivers.filter(d => (d.cdlExp - TODAY) / 864e5 < 30).map(d => `CDL for ${dlink(d)} expires ${fmtD(d.cdlExp)}`), ...trucks.filter(t => t.nextPm < addDays(TODAY, 7)).map(t => `<a href="#/trucks/${t.id}">Truck ${t.unit}</a> PM service due ${fmtD(t.nextPm)}`),
+    ...invoices.filter(i => i.status === 'Overdue').slice(0, 3).map(i => `Invoice <a href="#/billing/invoices/${i.id}">INV-${i.id}</a> is overdue (${money(i.amount)})`)];
+  return { title: 'Dashboard', html: head('Dashboard', `Good morning, Dana. Here's your fleet for ${DOW[TODAY.getDay()]}, ${fmtD(TODAY)}.`, `<a class="btn primary" href="#/loads/new">${ic('box', 16)} Create load</a><button type="button" class="btn" data-act="new-invoice">Create invoice</button>`) +
+    `<div class="kpis">${kpi('Revenue this week', money0(rev), `${loads.filter(l => l.del >= ws && l.del <= we).length} loads delivering`)}${kpi('In transit', transit.length, 'loads on the road')}${kpi('Needs a driver', avail.length, 'open loads')}${kpi('Available drivers', drivers.filter(d => driverStatus(d) === 'Available').length, `of ${drivers.length} drivers`)}${kpi('Open receivables', money0(open.reduce((a, i) => a + i.amount, 0)), `${invoices.filter(i => i.status === 'Overdue').length} overdue`)}</div>
+    <div class="cols"><div><section class="card flush" aria-labelledby="h-open"><div class="card-head"><h2 id="h-open">Loads that need a driver</h2><a href="#/dispatch">Open dispatch board</a></div>
+      ${tableHtml(['Load #', 'Customer', 'Route', 'Pickup', 'Rate', ''], avail.map(l => tr([llink(l.id), esc(cust(l.customerId).name), route(l), fmtS(l.pu), [money(l.rate), 'num'], [`<button type="button" class="btn sm" data-act="dispatch" data-id="${l.id}">Dispatch</button>`, 'act']])), 'Every load has a driver.')}</section>
+      <section class="card" aria-labelledby="h-rev"><h2 id="h-rev">Revenue, last 8 weeks</h2><div class="bars" role="img" aria-label="Weekly revenue for the last 8 weeks, in thousands of dollars: ${REV_WEEKS.join(', ')}">${REV_WEEKS.map((v, i) => `<div><span style="height:${Math.round(v / max * 120)}px"></span>${fmtS(weekStart(i - 7))}</div>`).join('')}</div></section></div>
+    <div><section class="card" aria-labelledby="h-alerts"><h2 id="h-alerts">Alerts</h2><ul class="alerts">${alerts.map(a => `<li>${a}</li>`).join('')}</ul></section>
+      <section class="card" aria-labelledby="h-transit"><h2 id="h-transit">On the road</h2><ul class="alerts">${transit.map(l => `<li>${llink(l.id)} · ${dlink(drv(l.driverId))}<div class="muted sm">${route(l)} · ETA ${fmtS(l.del)}</div></li>`).join('')}</ul></section></div></div>` };
+}
+function loadsFiltered() {
+  const f = S.loads, q = f.q.trim().toLowerCase(), from = parseIso(f.from);
+  return loads.filter(l => (f.status === 'all' || l.status === f.status) && (!f.customer || l.customerId === +f.customer) && (!f.equip || l.equip === f.equip) && (!from || l.pu >= from) &&
+    (!q || [l.id, cust(l.customerId).name, place(l.o), place(l.d), l.ref, dname(drv(l.driverId))].join(' ').toLowerCase().includes(q))).sort((a, b) => b.id - a.id);
+}
+function loadsResults() {
+  const f = S.loads, all = loadsFiltered(), pages = Math.max(1, Math.ceil(all.length / f.per)); f.page = Math.min(f.page, pages);
+  const rows = all.slice((f.page - 1) * f.per, f.page * f.per), start = all.length ? (f.page - 1) * f.per + 1 : 0;
+  return `${f.sel.size ? `<div class="bulk">${f.sel.size} selected</div>` : ''}<div class="table-wrap scroll ${[...f.hide].map(c => 'hide-' + c).join(' ')}"><table><thead><tr>
+    <th class="chk"><input type="checkbox" aria-label="Select all loads on this page" data-act="selall" ${rows.length && rows.every(l => f.sel.has(l.id)) ? 'checked' : ''}></th><th>Load #</th><th>Status</th><th>Customer</th><th>Pickup</th><th>Delivery</th><th>Driver</th><th class="col-truck">Truck</th><th class="num col-miles">Miles</th><th class="num">Rate</th><th class="num col-rpm">RPM</th><th><span class="sr" style="position:absolute;left:-9999px">Actions</span></th></tr></thead><tbody>
+    ${rows.map(l => { const t = trk(l.truckId); return `<tr><td class="chk"><input type="checkbox" aria-label="Select load ${l.id}" data-act="sel" data-id="${l.id}" ${f.sel.has(l.id) ? 'checked' : ''}></td>
+      <td><a href="#/loads/${l.id}"><b>${l.id}</b></a><div class="muted sm">${l.ref}</div></td><td>${lbadge(l.status)}</td><td>${esc(cust(l.customerId).name)}</td>
+      <td>${esc(place(l.o))}<div class="muted sm">${fmtS(l.pu)}, ${l.puWin}</div></td><td>${esc(place(l.d))}<div class="muted sm">${fmtS(l.del)}</div></td><td>${dlink(drv(l.driverId))}</td><td class="col-truck">${t ? t.unit : '—'}</td>
+      <td class="num col-miles">${l.miles.toLocaleString('en-US')}</td><td class="num">${money(l.rate)}</td><td class="num col-rpm">$${(l.rate / l.miles).toFixed(2)}</td>
+      <td class="act"><button type="button" class="icon-btn" aria-label="Actions for load ${l.id}" aria-haspopup="menu" aria-expanded="false" data-act="load-menu" data-id="${l.id}">⋯</button></td></tr>`; }).join('') || `<tr><td colspan="12" class="muted">No loads match these filters.</td></tr>`}
+    </tbody></table></div><div class="pager"><label for="per">Rows per page</label><select id="per" data-filter="per">${[20, 40, 100].map(n => `<option ${n === f.per ? 'selected' : ''}>${n}</option>`).join('')}</select>
+    <span>${start}–${start ? start + rows.length - 1 : 0} of ${all.length}</span><button type="button" class="icon-btn" aria-label="Previous page" data-act="page" data-d="-1" ${f.page <= 1 ? 'disabled' : ''}>${ic('left')}</button><button type="button" class="icon-btn" aria-label="Next page" data-act="page" data-d="1" ${f.page >= pages ? 'disabled' : ''}>${ic('right')}</button></div>`;
+}
+function pLoads() {
+  const f = S.loads; S.tabs.lstatus = f.status;
+  const count = s => s === 'all' ? loads.length : loads.filter(l => l.status === s).length;
+  return { title: 'Loads', html: head('Loads', 'All loads across customers and drivers.', `<button type="button" class="icon-btn" title="Columns" aria-haspopup="dialog" aria-expanded="false" data-act="columns">${ic('columns')}</button><a class="btn primary" href="#/loads/new">+ New load</a>`) +
+    `<div class="card flush"><div class="tabs" role="tablist" aria-label="Load status">${[['all', 'All'], ['available', 'Available'], ['dispatched', 'Dispatched'], ['in_transit', 'In Transit'], ['delivered', 'Delivered'], ['invoiced', 'Invoiced']].map(([k, t]) =>
+      `<button type="button" role="tab" id="tab-lstatus-${k}" aria-selected="${f.status === k}" aria-controls="panel-lstatus" tabindex="${f.status === k ? 0 : -1}" data-act="tab" data-group="lstatus" data-tab="${k}">${t} <span class="n">${count(k)}</span></button>`).join('')}</div>
+    <div class="filters"><div class="field"><label for="lq">Search</label><input id="lq" type="search" data-filter="q" value="${esc(f.q)}" placeholder="Load #, customer, city, ref…"></div>
+      <div class="field"><label for="lc">Customer</label><select id="lc" data-filter="customer"><option value="">All customers</option>${customers.map(c => `<option value="${c.id}" ${+f.customer === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></div>
+      <div class="field"><label for="le">Equipment</label><select id="le" data-filter="equip"><option value="">Any equipment</option>${EQUIP.map(e => `<option ${f.equip === e ? 'selected' : ''}>${e}</option>`).join('')}</select></div>
+      <div class="field"><label for="lf">Pickup from</label><input id="lf" type="date" data-filter="from" value="${esc(f.from)}"></div>
+      <button type="button" class="btn" data-act="clear-filters">Clear filters</button></div>
+    <div role="tabpanel" id="panel-lstatus" aria-labelledby="tab-lstatus-${f.status}"><div id="loads-results">${loadsResults()}</div></div></div>` };
+}
+function pLoad(id) {
+  const l = loadById(id); if (!l) return notFound(`Load ${id}`);
+  if (S.lastLoad !== id) { S.tabs.load = 'overview'; S.lastLoad = id; }
+  const c = cust(l.customerId), d = drv(l.driverId), t = trk(l.truckId), tl = trl(l.trailerId), inv = invoices.find(i => i.loadId === l.id), tab = S.tabs.load;
+  let body = '';
+  if (tab === 'overview') body = `<div class="card">${facts([['Customer', `<a href="#/customers/${c.id}">${esc(c.name)}</a>`], ['Customer ref #', l.ref], ['Equipment', l.equip], ['Commodity', esc(l.commodity)], ['Weight', l.weight.toLocaleString('en-US') + ' lbs'],
+    ['Driver', dlink(d)], ['Truck', t ? `<a href="#/trucks/${t.id}">${t.unit}</a>` : '—'], ['Trailer', tl ? tl.unit : '—'], ['Rate', money(l.rate)], ['Loaded miles', l.miles.toLocaleString('en-US')], ['Rate per mile', '$' + (l.rate / l.miles).toFixed(2)], ['Notes', esc(l.notes) || '—']])}</div>`;
+  if (tab === 'stops') body = `<div class="card flush">${tableHtml(['#', 'Type', 'Address', 'Date', 'Window', 'Status'], [[l.oAddr, 'Pickup', l.pu, l.puWin, l.status !== 'available' && l.status !== 'dispatched'], ...l.extra.map(x => [x.address, x.type, parseIso(x.date) || l.pu, x.window || '—', false]), [l.dAddr, 'Delivery', l.del, l.delWin, l.status === 'delivered' || l.status === 'invoiced']]
+    .map((s, i) => tr([i + 1, s[1], esc(s[0]), fmtD(s[2]), s[3], s[4] ? badge('Completed') : badge('Pending', 'gray')])))}</div>`;
+  if (tab === 'documents') body = `<div class="card flush"><div class="card-head"><h2>Documents</h2><button type="button" class="btn sm" data-act="upload" data-load="${l.id}">Upload document</button></div>${tableHtml(['Document', 'Type', 'Uploaded', 'By'],
+    [['ratecon_' + l.id + '.pdf', 'Rate confirmation', addDays(l.pu, -3)], ...(l.status !== 'available' && l.status !== 'dispatched' ? [['bol_' + l.id + '.pdf', 'Bill of lading', l.pu]] : []), ...(l.status === 'delivered' || l.status === 'invoiced' ? [['pod_' + l.id + '.pdf', 'Proof of delivery', l.del]] : []), ...documents.filter(x => x.related === 'Load ' + l.id && x.uploaded).map(x => [x.name, x.type, x.uploaded])]
+    .map(x => tr([`<a href="#/documents">${x[0]}</a>`, x[1], fmtD(x[2]), 'Dana Whitfield'])))}</div>`;
+  if (tab === 'billing') body = `<div class="card">${tableHtml(['Item', 'Amount'], [['Line haul', l.rate], ['Fuel surcharge', l.fsc], ['Detention', l.detention], ['Total', l.rate + l.fsc + l.detention]].map(x => tr([x[0] === 'Total' ? '<b>Total</b>' : x[0], [money(x[1]), 'num']])))}
+    <p style="margin:14px 0 0">${inv ? `Invoice <a href="#/billing/invoices/${inv.id}">INV-${inv.id}</a> · ${badge(inv.status)} · due ${fmtD(inv.due)}` : `Not invoiced yet. <button type="button" class="btn sm" data-act="new-invoice" data-load="${l.id}">Create invoice</button>`}</p></div>`;
+  if (tab === 'history') body = `<div class="card"><ul class="timeline">${l.history.slice().reverse().map(([dt, t]) => `<li>${esc(t)}<div class="muted sm">${fmtD(dt)}</div></li>`).join('')}</ul></div>`;
+  return { title: `Load ${l.id}`, html: head(`Load #${l.id} ${lbadge(l.status)}`, `${esc(c.name)} · ${l.equip} · Ref ${l.ref}`,
+    `<button type="button" class="btn primary" data-act="dispatch" data-id="${l.id}">Dispatch</button><a class="btn" href="#/loads/${l.id}/edit">${ic('pencil', 15)} Edit</a><button type="button" class="icon-btn" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-act="load-more" data-id="${l.id}">⋯</button>`,
+    `<a href="#/loads">Loads</a> / <span aria-current="page">Load ${l.id}</span>`) +
+    `<div class="card route"><div><span class="muted sm">Pickup · ${fmtD(l.pu)} · ${l.puWin}</span><b>${esc(place(l.o))}</b><span class="muted sm">${esc(l.oAddr)}</span></div><span class="arrow" aria-hidden="true">→</span>
+      <div><span class="muted sm">Delivery · ${fmtD(l.del)} · ${l.delWin}</span><b>${esc(place(l.d))}</b><span class="muted sm">${esc(l.dAddr)}</span></div><span class="grow"></span><div class="num"><span class="muted sm">${l.miles} mi</span><b>${money(l.rate)}</b></div></div>
+    ${tabsHtml('load', [['overview', 'Overview'], ['stops', 'Stops'], ['documents', 'Documents'], ['billing', 'Billing'], ['history', 'History']], 'Load sections')}${panel('load', body)}` };
+}
+function stopHtml(prefix, title, s = {}) {
+  return `<fieldset class="form-section"><legend>${title}</legend>${fieldHtml({ name: prefix + 'Addr', label: 'Address', required: true, value: s.addr, placeholder: 'Street, city, state, ZIP', id: prefix + '-addr' })}
+    <div class="grid2">${fieldHtml({ name: prefix + 'Date', label: 'Date', type: 'date', required: true, value: s.date, id: prefix + '-date' })}<div class="grid2">${fieldHtml({ name: prefix + 'From', label: 'Window start', type: 'time', value: s.from || '08:00' })}${fieldHtml({ name: prefix + 'To', label: 'Window end', type: 'time', value: s.to || '12:00' })}</div></div></fieldset>`;
+}
+function extraStopHtml(n) {
+  return `<div class="stop-box" data-stop><div style="display:flex;align-items:center;justify-content:space-between"><h3 class="stop-title">Stop ${n}</h3><button type="button" class="icon-btn" aria-label="Remove stop ${n}" data-act="remove-stop">${ic('x', 16)}</button></div>
+    <div class="grid2">${fieldHtml({ name: 'xType', label: 'Stop type', type: 'select', placeholder: false, options: ['Pickup', 'Delivery'] })}${fieldHtml({ name: 'xDate', label: 'Date', type: 'date' })}</div>${fieldHtml({ name: 'xAddr', label: 'Address', placeholder: 'Street, city, state, ZIP' })}</div>`;
+}
+function pLoadForm(id) {
+  const l = id ? loadById(id) : null; if (id && !l) return notFound(`Load ${id}`);
+  const eq = l ? l.equip : '', [pf, pt] = l ? l.puWin.split('–') : [], [df, dt] = l ? l.delWin.split('–') : [];
+  const title = l ? `Edit load #${l.id}` : 'New load';
+  return { title, html: head(title, l ? 'Changes are saved to the load and its history.' : 'Enter the load from the rate confirmation.', '', `<a href="#/loads">Loads</a> / <span aria-current="page">${l ? 'Edit load ' + l.id : 'New load'}</span>`) +
+    `<form id="load-form" novalidate style="max-width:860px"><div class="err-summary" role="alert" hidden></div>
+    <fieldset class="form-section"><legend>Customer</legend><div class="grid2">${fieldHtml({ name: 'customerId', id: 'lf-customer', label: 'Customer (broker / shipper)', type: 'select', required: true, value: l && l.customerId, placeholder: 'Select a customer', options: customers.map(c => [c.id, `${c.name}${c.type === 'Broker' ? ' · ' + c.mc : ''}`]) })}
+      ${fieldHtml({ name: 'ref', label: 'Customer reference #', value: l && l.ref, placeholder: 'e.g. BK-48213' })}</div></fieldset>
+    <fieldset class="form-section"><legend>Load details</legend><div class="grid2">${fieldHtml({ name: 'loadNo', id: 'lf-loadno', label: 'Load #', required: true, value: l ? l.id : nextId(loads, 1020) })}
+      <div class="field cselect" data-cselect><span class="lbl-text" id="eq-label">Equipment type <span class="req" aria-hidden="true">*</span></span>
+        <button type="button" class="cselect-btn" id="eq-btn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="eq-label eq-btn" data-act="cselect"><span class="val">${eq || 'Select equipment'}</span>${ic('chev', 16)}</button>
+        <ul role="listbox" id="eq-list" aria-labelledby="eq-label" tabindex="-1" hidden>${EQUIP.map(e => `<li role="option" data-act="coption" data-value="${e}" aria-selected="${e === eq}">${e}</li>`).join('')}</ul>
+        <input type="hidden" name="equip" value="${eq}" required><small class="err" hidden></small></div>
+      ${fieldHtml({ name: 'commodity', label: 'Commodity', value: l && l.commodity })}${fieldHtml({ name: 'weight', label: 'Weight (lbs)', type: 'number', min: 0, value: l && l.weight })}</div></fieldset>
+    ${stopHtml('pu', 'Pickup stop', l ? { addr: l.oAddr, date: iso(l.pu), from: pf, to: pt } : {})}${stopHtml('del', 'Delivery stop', l ? { addr: l.dAddr, date: iso(l.del), from: df, to: dt } : {})}
+    <div id="extra-stops">${l ? l.extra.map((x, i) => extraStopHtml(i + 3)).join('') : ''}</div><p><button type="button" class="btn" data-act="add-stop">+ Add stop</button></p>
+    <fieldset class="form-section"><legend>Rate and notes</legend><div class="grid2">${fieldHtml({ name: 'rate', id: 'lf-rate', label: 'Rate ($)', type: 'number', step: '0.01', min: 1, required: true, value: l && l.rate, placeholder: '0.00' })}${fieldHtml({ name: 'miles', label: 'Loaded miles', type: 'number', min: 0, value: l && l.miles })}</div>
+      ${fieldHtml({ name: 'notes', label: 'Notes', type: 'textarea', value: l && l.notes, placeholder: 'Appointment numbers, special instructions…' })}</fieldset>
+    <div class="form-foot"><a class="btn" href="${l ? '#/loads/' + l.id : '#/loads'}">Cancel</a><button type="submit" class="btn primary">${l ? 'Save load' : 'Create load'}</button></div></form>`,
+    after() {
+      const form = $('#load-form');
+      form.addEventListener('submit', async e => {
+        e.preventDefault(); const sum = $('.err-summary', form);
+        if (!validate(form)) { sum.hidden = false; sum.textContent = 'Please fill in the required fields.'; return; } sum.hidden = true;
+        const x = readForm(form), extra = $$('[data-stop]', form).map(b => ({ type: $('[name=xType]', b).value, date: $('[name=xDate]', b).value, address: $('[name=xAddr]', b).value }));
+        const payload = { id: +x.loadNo, customerId: +x.customerId, ref: x.ref, equipment: x.equip, commodity: x.commodity, weight: +x.weight || 0, pickup: { address: x.puAddr, date: x.puDate, window: `${x.puFrom}–${x.puTo}` }, delivery: { address: x.delAddr, date: x.delDate, window: `${x.delFrom}–${x.delTo}` }, extraStops: extra, rate: +x.rate, miles: +x.miles || 0, notes: x.notes };
+        const cityOf = a => { const m = String(a).split(',').map(s => s.trim()); const st = (m[2] || '').split(' ')[0]; return CITIES.find(c => c[0] === m[1] && c[1] === st) || [m[1] || m[0] || 'Unknown', st || '', 0, 0]; };
+        const ok = await commit($('[type=submit]', form), l ? 'update_load' : 'create_load', payload, () => {
+          const rec = l || { id: payload.id, status: 'available', driverId: null, truckId: null, trailerId: null, fsc: 0, detention: 0, history: [[TODAY, 'Load created by Dana Whitfield']] };
+          Object.assign(rec, { customerId: payload.customerId, ref: payload.ref || '—', equip: payload.equipment, commodity: payload.commodity || '—', weight: payload.weight, oAddr: x.puAddr, dAddr: x.delAddr, o: cityOf(x.puAddr), d: cityOf(x.delAddr), pu: parseIso(x.puDate), del: parseIso(x.delDate), puWin: payload.pickup.window, delWin: payload.delivery.window, rate: payload.rate, miles: payload.miles || 1, notes: payload.notes, extra });
+          if (l) l.history.push([TODAY, 'Load edited by Dana Whitfield']); else loads.push(rec);
+        }, l ? `Load ${payload.id} saved` : `Load ${payload.id} created`);
+        if (ok) location.hash = '#/loads/' + payload.id;
+      });
+    } };
+}
+function pDispatch() {
+  const ws = weekStart(S.week), days = Array.from({ length: 7 }, (_, i) => addDays(ws, i));
+  const chips = (list, day) => list.filter(l => l.pu <= day && l.del >= day || sameDay(l.pu, day)).map(l => { const first = sameDay(l.pu, day) || sameDay(day, ws);
+    return `<button type="button" class="chip ${l.status}${first ? '' : ' cont'}" aria-haspopup="dialog" aria-expanded="false" data-act="chip" data-id="${l.id}" title="Load ${l.id}: ${esc(place(l.o))} to ${esc(place(l.d))}">${first ? `#${l.id} ${esc(l.o[0])} → ${esc(l.d[0])}` : `↳ #${l.id}`}</button>`; }).join('');
+  const row = (label, list) => `<tr><th scope="row">${label}</th>${days.map(day => `<td>${chips(list, day)}</td>`).join('')}</tr>`;
+  return { title: 'Dispatch Board', html: head('Dispatch Board', `Week of ${fmtS(ws)} – ${fmtD(days[6])}`,
+    `<button type="button" class="icon-btn" aria-label="Previous week" data-act="week" data-d="-1">${ic('left')}</button><button type="button" class="btn" data-act="week" data-d="0">This week</button><button type="button" class="icon-btn" aria-label="Next week" data-act="week" data-d="1">${ic('right')}</button><button type="button" class="icon-btn" title="Refresh" data-act="refresh">${ic('refresh')}</button>`) +
+    `<p class="muted sm">${['available', 'dispatched', 'in_transit', 'delivered'].map(s => `<span class="chip ${s}" style="display:inline-block;width:auto;margin-right:6px">${ST[s][0]}</span>`).join('')}</p>
+    <div class="card flush"><div class="table-wrap"><table class="board"><thead><tr><th scope="col">Driver</th>${days.map(d => `<th scope="col" class="${sameDay(d, TODAY) ? 'today' : ''}">${DOW[d.getDay()]} ${fmtS(d)}</th>`).join('')}</tr></thead><tbody>
+    ${row('<span class="muted">Unassigned</span>', loads.filter(l => l.status === 'available'))}${drivers.map(d => { const t = trk(d.truckId); return row(`${dlink(d)}<div class="muted sm">${t ? 'Unit ' + t.unit : 'No truck'} · ${driverStatus(d)}</div>`, loads.filter(l => l.driverId === d.id)); }).join('')}
+    </tbody></table></div></div>` };
+}
+function chipPopover(trigger, id) {
+  const l = loadById(id), d = drv(l.driverId);
+  showFloating(trigger, `<div class="popover" role="dialog" aria-label="Load ${l.id}"><div class="pop-head"><h2 style="margin:0">Load #${l.id} ${lbadge(l.status)}</h2><button type="button" class="icon-btn" aria-label="Close" data-act="close-pop">${ic('x', 16)}</button></div>
+    <div class="pop-body">${facts([['Route', route(l)], ['Dates', `${fmtS(l.pu)} → ${fmtS(l.del)}`], ['Driver', d ? esc(dname(d)) : 'Unassigned'], ['Rate', money(l.rate)]])}</div>
+    <div class="pop-foot">${l.status === 'available' ? `<button type="button" class="btn sm" data-act="dispatch" data-id="${l.id}">Dispatch</button>` : ''}<a class="btn sm primary" href="#/loads/${l.id}">Open load</a></div></div>`, { align: 'left', focus: false });
+}
+function pDrivers() {
+  const f = S.drivers, q = f.q.toLowerCase(), list = drivers.filter(d => (!q || [dname(d), d.phone, d.email, d.cdl].join(' ').toLowerCase().includes(q)) && (!f.status || driverStatus(d) === f.status));
+  return { title: 'Drivers', html: head('Drivers', `${drivers.length} drivers · ${drivers.filter(d => driverStatus(d) === 'Available').length} available now`, `<button type="button" class="btn primary" data-act="new-driver">Add driver</button>`) +
+    `<div class="card flush"><div class="filters"><div class="field"><label for="dq">Search drivers</label><input id="dq" type="search" data-dfilter="q" value="${esc(f.q)}" placeholder="Name, phone, CDL…"></div>
+    <div class="field"><label for="ds">Status</label><select id="ds" data-dfilter="status"><option value="">All statuses</option>${['Available', 'On load', 'Off duty'].map(s => `<option ${f.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div></div>
+    ${tableHtml(['Name', 'Status', 'Phone', 'CDL #', 'CDL expiry', 'Pay', 'Truck', ''], list.map(d => { const t = trk(d.truckId), soon = (d.cdlExp - TODAY) / 864e5 < 30;
+      return tr([`<a href="#/drivers/${d.id}"><b>${esc(dname(d))}</b></a><div class="muted sm">${esc(d.email)}</div>`, badge(driverStatus(d)), d.phone, d.cdl, soon ? badge(fmtD(d.cdlExp), 'amber') : fmtD(d.cdlExp), esc(payText(d)), t ? `<a href="#/trucks/${t.id}">${t.unit}</a>` : '—',
+        [`<button type="button" class="icon-btn" aria-label="Edit ${esc(dname(d))}" data-act="edit-driver" data-id="${d.id}">${ic('pencil', 16)}</button>`, 'act']]); }), 'No drivers match.')}</div>` };
+}
+function pDriver(id) {
+  const d = drv(id); if (!d) return notFound(`Driver ${id}`);
+  if (S.lastDriver !== id) { S.tabs.driver = 'overview'; S.lastDriver = id; }
+  const t = trk(d.truckId), my = loads.filter(l => l.driverId === d.id).sort((a, b) => b.id - a.id), tab = S.tabs.driver;
+  const body = tab === 'overview' ? `<div class="card">${facts([['Phone', d.phone], ['Email', esc(d.email)], ['CDL number', d.cdl], ['CDL expiry', fmtD(d.cdlExp)], ['Medical card expiry', fmtD(d.medExp)], ['Pay', esc(payText(d))], ['Truck', t ? `<a href="#/trucks/${t.id}">Unit ${t.unit}</a>` : '—'], ['Hire date', fmtD(d.hired)], ['Home terminal', d.home]])}</div>`
+    : tab === 'loads' ? `<div class="card flush">${tableHtml(['Load #', 'Status', 'Route', 'Pickup', 'Delivery', 'Rate'], my.map(l => tr([llink(l.id), lbadge(l.status), route(l), fmtS(l.pu), fmtS(l.del), [money(l.rate), 'num']])), 'No loads yet.')}</div>`
+    : tab === 'settlements' ? `<div class="card flush">${tableHtml(['Settlement', 'Period', 'Gross', 'Net', 'Status'], settlements.filter(s => s.driverId === d.id).map(s => tr(['SET-' + s.id, `${fmtS(s.start)} – ${fmtS(s.end)}`, [money(s.gross), 'num'], [money(s.net), 'num'], badge(s.status)])), 'No settlements yet.')}</div>`
+    : `<div class="card flush">${tableHtml(['Document', 'Expires', 'Status'], [['CDL', d.cdlExp], ['Medical card', d.medExp], ['MVR', addDays(d.hired, 365 * 9)], ['Drug & alcohol clearinghouse', addDays(TODAY, 200)]].map(([n, e]) => tr([n, fmtD(e), e < addDays(TODAY, 30) ? badge('Expiring', 'amber') : badge('Valid', 'green')])))}</div>`;
+  return { title: dname(d), html: head(`${esc(dname(d))} ${badge(driverStatus(d))}`, `Driver #${d.id} · ${esc(payText(d))}`, `<button type="button" class="btn" data-act="edit-driver" data-id="${d.id}">${ic('pencil', 15)} Edit driver</button>`, `<a href="#/drivers">Drivers</a> / <span aria-current="page">${esc(dname(d))}</span>`) +
+    tabsHtml('driver', [['overview', 'Overview'], ['loads', 'Loads'], ['settlements', 'Settlements'], ['documents', 'Documents']], 'Driver sections') + panel('driver', body) };
+}
+function pTrucks() {
+  return { title: 'Trucks', html: head('Trucks', `${trucks.length} power units · ${trucks.filter(t => t.status === 'In shop').length} in the shop`, `<button type="button" class="btn primary" data-act="new-truck">Add truck</button>`) +
+    `<div class="card flush">${tableHtml(['Unit', 'Make / model', 'Year', 'VIN', 'Plate', 'Driver', 'Status', 'Odometer', 'Next PM'], trucks.map(t => tr([`<a href="#/trucks/${t.id}"><b>${t.unit}</b></a>`, `${t.make} ${t.model}`, t.year, `<code>${t.vin}</code>`, t.plate, dlink(truckDriver(t)), badge(t.status), [t.odometer.toLocaleString('en-US') + ' mi', 'num'], t.nextPm < addDays(TODAY, 7) ? badge(fmtD(t.nextPm), 'amber') : fmtD(t.nextPm)])))}</div>` };
+}
+function pTruck(id) {
+  const t = trk(id); if (!t) return notFound(`Truck ${id}`);
+  return { title: 'Truck ' + t.unit, html: head(`Truck ${t.unit} ${badge(t.status)}`, `${t.year} ${t.make} ${t.model}`, `<button type="button" class="btn" data-act="new-service" data-truck="${t.id}">Schedule service</button>`, `<a href="#/trucks">Trucks</a> / <span aria-current="page">Truck ${t.unit}</span>`) +
+    `<div class="card">${facts([['VIN', t.vin], ['Plate', t.plate], ['Driver', dlink(truckDriver(t))], ['Odometer', t.odometer.toLocaleString('en-US') + ' mi'], ['Next PM', fmtD(t.nextPm)]])}</div>
+    <div class="card flush"><div class="card-head"><h2>Maintenance</h2></div>${tableHtml(['Service', 'Date', 'Shop', 'Cost', 'Status'], maintenance.filter(m => m.truckId === t.id).map(m => tr([m.type, fmtD(m.date), m.shop, [m.cost ? money(m.cost) : '—', 'num'], badge(m.status)])), 'No service records.')}</div>` };
+}
+function pTrailers() {
+  return { title: 'Trailers', html: head('Trailers', `${trailers.length} trailers`, `<button type="button" class="btn primary" data-act="new-trailer">Add trailer</button>`) +
+    `<div class="card flush">${tableHtml(['Trailer #', 'Type', 'Year', 'Plate', 'Status', 'Current load'], trailers.map(t => { const l = loads.find(x => x.trailerId === t.id && (x.status === 'in_transit' || x.status === 'dispatched')); return tr([`<b>${t.unit}</b>`, t.type, t.year, t.plate, badge(l ? 'In use' : t.status), l ? llink(l.id) : '—']); }))}</div>` };
+}
+function pCustomers() {
+  const bal = c => invoices.filter(i => i.customerId === c.id && (i.status === 'Sent' || i.status === 'Overdue')).reduce((a, i) => a + i.amount, 0);
+  return { title: 'Customers', html: head('Customers', 'Brokers and shippers you haul for.', `<button type="button" class="btn primary" data-act="new-customer">Add customer</button>`) +
+    `<div class="card flush">${tableHtml(['Name', 'Type', 'MC #', 'Contact', 'Phone', 'Terms', 'Open balance', 'Credit'], customers.map(c => tr([`<a href="#/customers/${c.id}"><b>${esc(c.name)}</b></a>`, badge(c.type), c.mc, esc(c.contact), c.phone, c.terms, [money(bal(c)), 'num'], badge(c.credit, c.credit === 'Approved' ? 'green' : 'red')])))}</div>` };
+}
+function pCustomer(id) {
+  const c = cust(id); if (!c) return notFound(`Customer ${id}`);
+  return { title: c.name, html: head(`${esc(c.name)} ${badge(c.type)}`, `${c.mc} · ${c.terms}`, `<a class="btn primary" href="#/loads/new">+ New load</a>`, `<a href="#/customers">Customers</a> / <span aria-current="page">${esc(c.name)}</span>`) +
+    `<div class="card">${facts([['Contact', esc(c.contact)], ['Phone', c.phone], ['Billing email', esc(c.email)], ['Payment terms', c.terms], ['Credit', c.credit]])}</div>
+    <div class="card flush"><div class="card-head"><h2>Loads</h2></div>${tableHtml(['Load #', 'Status', 'Route', 'Pickup', 'Rate'], loads.filter(l => l.customerId === c.id).map(l => tr([llink(l.id), lbadge(l.status), route(l), fmtS(l.pu), [money(l.rate), 'num']])), 'No loads yet.')}</div>` };
+}
+function pInvoices() {
+  const f = S.inv, q = f.q.toLowerCase(), list = invoices.filter(i => (!f.status || i.status === f.status) && (!q || `INV-${i.id} ${i.loadId} ${cust(i.customerId).name}`.toLowerCase().includes(q))).sort((a, b) => b.id - a.id);
+  const sum = s => invoices.filter(i => s.includes(i.status)).reduce((a, i) => a + i.amount, 0);
+  return { title: 'Invoices', html: head('Invoices', 'Bill customers for delivered loads.', `<button type="button" class="btn primary" data-act="new-invoice">Create invoice</button>`) +
+    `<div class="kpis">${kpi('Outstanding', money0(sum(['Sent', 'Overdue'])))}${kpi('Overdue', money0(sum(['Overdue'])), `${invoices.filter(i => i.status === 'Overdue').length} invoices`)}${kpi('With factoring', money0(sum(['Factored'])))}${kpi('Paid, last 30 days', money0(sum(['Paid'])))}</div>
+    <div class="card flush"><div class="filters"><div class="field"><label for="iq">Search invoices</label><input id="iq" type="search" data-ifilter="q" value="${esc(f.q)}" placeholder="Invoice #, load #, customer…"></div>
+    <div class="field"><label for="is">Status</label><select id="is" data-ifilter="status"><option value="">All statuses</option>${['Draft', 'Sent', 'Overdue', 'Paid', 'Factored', 'Void'].map(s => `<option ${f.status === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div></div>
+    ${tableHtml(['Invoice #', 'Load', 'Customer', 'Issued', 'Due', 'Terms', 'Amount', 'Status', ''], list.map(i => tr([`<a href="#/billing/invoices/${i.id}"><b>INV-${i.id}</b></a>`, llink(i.loadId), esc(cust(i.customerId).name), fmtD(i.issued), fmtD(i.due), i.terms, [money(i.amount), 'num'], badge(i.status),
+      [`<button type="button" class="icon-btn" aria-label="Actions for invoice INV-${i.id}" aria-haspopup="menu" aria-expanded="false" data-act="inv-menu" data-id="${i.id}">⋯</button>`, 'act']])), 'No invoices match.')}</div>` };
+}
+function pInvoice(id) {
+  const i = invById(id); if (!i) return notFound(`Invoice ${id}`);
+  const l = loadById(i.loadId), c = cust(i.customerId), done = i.status === 'Paid' || i.status === 'Factored' || i.status === 'Void';
+  return { title: 'INV-' + i.id, html: head(`Invoice INV-${i.id} ${badge(i.status)}`, `${esc(c.name)} · ${i.terms} · due ${fmtD(i.due)}`, done ? '' : `<button type="button" class="btn" data-act="inv-paid" data-id="${i.id}">Mark as paid</button><button type="button" class="btn primary" data-act="inv-factor" data-id="${i.id}">Send to factoring</button>`, `<a href="#/billing/invoices">Invoices</a> / <span aria-current="page">INV-${i.id}</span>`) +
+    `<div class="card">${facts([['Bill to', `<a href="#/customers/${c.id}">${esc(c.name)}</a>`], ['Load', l ? llink(l.id) : i.loadId], ['Issued', fmtD(i.issued)], ['Due', fmtD(i.due)], ['Amount', money(i.amount)]])}</div>
+    <div class="card">${tableHtml(['Description', 'Amount'], l ? [[`Line haul ${route(l)}`, l.rate], ['Fuel surcharge', l.fsc], ['Detention', l.detention]].filter(x => x[1]).map(x => tr([x[0], [money(x[1]), 'num']])) : [])}</div>` };
+}
+function pFactoring() {
+  const f = invoices.filter(i => i.status === 'Factored');
+  return { title: 'Factoring', html: head('Factoring', 'Invoices sent to your factoring company.', `<a class="btn" href="#/billing/invoices">Go to invoices</a>`) +
+    `<div class="card">${facts([['Factoring company', 'Lone Oak Capital (sample)'], ['Advance rate', '97%'], ['Fee', '3% flat'], ['Recourse', 'Non-recourse'], ['Reserve held', money(f.reduce((a, i) => a + i.amount * .03, 0))]])}</div>
+    <div class="card flush"><div class="card-head"><h2>Factored invoices</h2></div>${tableHtml(['Invoice #', 'Customer', 'Amount', 'Advance (97%)', 'Status'], f.map(i => tr([`<a href="#/billing/invoices/${i.id}">INV-${i.id}</a>`, esc(cust(i.customerId).name), [money(i.amount), 'num'], [money(i.amount * .97), 'num'], badge('Funded', 'green')])), 'Nothing sent to factoring yet.')}</div>` };
+}
+function pSettlements() {
+  return { title: 'Settlements', html: head('Driver settlements', 'Weekly driver pay statements.', `<button type="button" class="btn primary" data-act="new-settlement">New settlement</button>`) +
+    `<div class="card flush">${tableHtml(['Settlement #', 'Driver', 'Period', 'Loads', 'Gross', 'Deductions', 'Net pay', 'Status'], settlements.map(s => tr([`<b>SET-${s.id}</b>`, dlink(drv(s.driverId)), `${fmtS(s.start)} – ${fmtD(s.end)}`, [s.loads, 'num'], [money(s.gross), 'num'], [money(s.deductions), 'num'], [money(s.net), 'num'], badge(s.status)])))}</div>` };
+}
+function pFuel() {
+  const tab = S.tabs.fuel || 'purchases', states = {}; fuel.forEach(x => { states[x.state] = (states[x.state] || 0) + x.gallons; });
+  const body = tab === 'purchases' ? `<div class="card flush">${tableHtml(['Date', 'Truck', 'Driver', 'Location', 'Gallons', '$/gal', 'Total', 'Card'], fuel.map(x => tr([fmtD(x.date), `<a href="#/trucks/${x.truckId}">${trk(x.truckId).unit}</a>`, dlink(drv(x.driverId)), esc(x.where), [x.gallons.toFixed(1), 'num'], [x.ppg.toFixed(3), 'num'], [money(x.total), 'num'], x.card])))}</div>`
+    : `<div class="card"><div class="filters" style="padding:0 0 12px;border:0"><div class="field"><label for="ifta-q">Quarter</label><select id="ifta-q"><option>Q3 2026 (Jul–Sep)</option><option>Q2 2026 (Apr–Jun)</option><option>Q1 2026 (Jan–Mar)</option></select></div></div>
+      <p>Filing deadline: <b>Oct 31, 2026</b> · Fleet MPG: <b>6.4</b></p>${tableHtml(['State', 'Miles', 'Taxable gallons', 'Tax-paid gallons', 'Tax due'], Object.keys(states).sort().map(st => { const g = states[st], miles = Math.round(g * 6.4 * (1 + (st.charCodeAt(0) % 5) / 10)); return tr([st, [miles.toLocaleString('en-US'), 'num'], [(miles / 6.4).toFixed(1), 'num'], [g.toFixed(1), 'num'], [money((miles / 6.4 - g) * .27), 'num']]); }))}</div>`;
+  return { title: 'Fuel & IFTA', html: head('Fuel & IFTA', 'Fuel card transactions and quarterly IFTA.', `<button type="button" class="btn primary" data-act="new-fuel">Log fuel purchase</button>`) + tabsHtml('fuel', [['purchases', 'Fuel purchases'], ['ifta', 'IFTA report']], 'Fuel sections') + panel('fuel', body) };
+}
+function pMaintenance() {
+  const up = maintenance.filter(m => m.status === 'Scheduled'), past = maintenance.filter(m => m.status !== 'Scheduled');
+  const rows = list => list.map(m => tr([`WO-${m.id}`, `<a href="#/trucks/${m.truckId}">${trk(m.truckId).unit}</a>`, m.type, fmtD(m.date), esc(m.shop), [m.cost ? money(m.cost) : '—', 'num'], badge(m.status)]));
+  return { title: 'Maintenance', html: head('Maintenance', 'Preventive maintenance and repairs.', `<button type="button" class="btn primary" data-act="new-service">Schedule service</button>`) +
+    `<div class="card flush"><div class="card-head"><h2>Upcoming</h2></div>${tableHtml(['Work order', 'Truck', 'Service', 'Date', 'Shop', 'Cost', 'Status'], rows(up))}</div><div class="card flush"><div class="card-head"><h2>History</h2></div>${tableHtml(['Work order', 'Truck', 'Service', 'Date', 'Shop', 'Cost', 'Status'], rows(past))}</div>` };
+}
+function pDocuments() {
+  const list = documents.filter(x => !S.docs.type || x.type === S.docs.type);
+  return { title: 'Documents', html: head('Documents', 'Rate confirmations, BOLs, PODs and compliance files.', `<button type="button" class="btn primary" data-act="upload">Upload document</button>`) +
+    `<div class="card flush"><div class="filters"><div class="field"><label for="dt">Document type</label><select id="dt" data-docfilter="type"><option value="">All types</option>${DOC_TYPES.map(t => `<option ${S.docs.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div></div>
+    ${tableHtml(['File', 'Type', 'Related to', 'Uploaded', 'By'], list.map(x => tr([`<b>${esc(x.name)}</b>`, x.type, esc(x.related), fmtD(x.uploaded), esc(x.by)])), 'No documents of this type.')}</div>` };
+}
+const REPORTS = { customer: ['Revenue by customer', 'Line haul revenue and loads per customer'], driver: ['Driver gross', 'Revenue and miles per driver'], truck: ['Truck revenue', 'Revenue per power unit'], aging: ['A/R aging', 'Unpaid invoices by days outstanding'] };
+function reportTable(key) {
+  const days = +S.reportRange, since = addDays(TODAY, -days), ls = loads.filter(l => l.pu >= since && l.pu <= TODAY);
+  const group = (keyOf, label) => { const m = new Map(); ls.forEach(l => { const k = keyOf(l); if (k == null) return; const r = m.get(k) || { n: 0, rev: 0, mi: 0 }; r.n++; r.rev += l.rate; r.mi += l.miles; m.set(k, r); });
+    return tableHtml([label, 'Loads', 'Miles', 'Revenue', 'RPM'], [...m].sort((a, b) => b[1].rev - a[1].rev).map(([k, r]) => tr([esc(k), [r.n, 'num'], [r.mi.toLocaleString('en-US'), 'num'], [money(r.rev), 'num'], ['$' + (r.rev / r.mi).toFixed(2), 'num']]))); };
+  if (key === 'customer') return group(l => cust(l.customerId).name, 'Customer');
+  if (key === 'driver') return group(l => l.driverId ? dname(drv(l.driverId)) : null, 'Driver');
+  if (key === 'truck') return group(l => l.truckId ? 'Unit ' + trk(l.truckId).unit : null, 'Truck');
+  const b = { 'Current': 0, '1–30 days': 0, '31–60 days': 0, '60+ days': 0 }; invoices.filter(i => i.status === 'Sent' || i.status === 'Overdue').forEach(i => { const d = (TODAY - i.due) / 864e5; b[d <= 0 ? 'Current' : d <= 30 ? '1–30 days' : d <= 60 ? '31–60 days' : '60+ days'] += i.amount; });
+  return tableHtml(['Bucket', 'Amount'], Object.entries(b).map(([k, v]) => tr([k, [money(v), 'num']])));
+}
+function pReports() {
+  return { title: 'Reports', html: head('Reports', 'Pick a report, set the range and run it.') + `<div class="report-cards">${Object.entries(REPORTS).map(([k, [t, s]]) => `<button type="button" aria-pressed="${S.report === k}" data-act="report" data-key="${k}"><b>${t}</b><span>${s}</span></button>`).join('')}</div>
+    <div class="card"><div class="filters" style="padding:0 0 12px;border:0"><div class="field"><label for="rr">Date range</label><select id="rr" data-rfilter="range">${[['7', 'Last 7 days'], ['30', 'Last 30 days'], ['90', 'Last 90 days']].map(([v, t]) => `<option value="${v}" ${S.reportRange === v ? 'selected' : ''}>${t}</option>`).join('')}</select></div><button type="button" class="btn primary" data-act="run-report">Run report</button></div>
+    <h2>${REPORTS[S.report][0]}</h2><div id="report-out">${reportTable(S.report)}</div></div>` };
+}
+function pSettings() {
+  const tab = S.tabs.settings || 'company'; let body = '';
+  if (tab === 'company') body = `<form id="company-form" class="card" novalidate style="max-width:760px"><h2>Company profile</h2><div class="grid2">${fieldHtml({ name: 'name', label: 'Company name', required: true, value: company.name })}${fieldHtml({ name: 'email', label: 'Office email', type: 'email', value: company.email })}
+    ${fieldHtml({ name: 'dot', label: 'USDOT number', required: true, value: company.dot })}${fieldHtml({ name: 'mc', label: 'MC number', value: company.mc })}${fieldHtml({ name: 'address', label: 'Street address', value: company.address })}${fieldHtml({ name: 'city', label: 'City', value: company.city })}
+    ${fieldHtml({ name: 'state', label: 'State', value: company.state })}${fieldHtml({ name: 'zip', label: 'ZIP code', value: company.zip })}${fieldHtml({ name: 'phone', label: 'Phone', type: 'tel', value: company.phone })}
+    ${fieldHtml({ name: 'tz', label: 'Time zone', type: 'select', placeholder: false, value: company.tz, options: ['Eastern Time (ET)', 'Central Time (CT)', 'Mountain Time (MT)', 'Pacific Time (PT)'] })}${fieldHtml({ name: 'terms', label: 'Default payment terms', type: 'select', placeholder: false, value: company.terms, options: ['Net 15', 'Net 30', 'Quick Pay'] })}</div>
+    <div class="actions" style="justify-content:flex-end"><button type="submit" class="btn primary">Save changes</button></div></form>`;
+  if (tab === 'users') body = `<div class="card flush"><div class="card-head"><h2>Users</h2><button type="button" class="btn primary" data-act="invite">Invite user</button></div>${tableHtml(['Name', 'Email', 'Role', 'Status', 'Last active'], users.map(u => tr([esc(u.name), esc(u.email), u.role, badge(u.status), u.last])))}</div>
+    <div class="card"><h2>Roles</h2>${facts([['Admin', 'Everything, including billing and users'], ['Dispatcher', 'Loads, dispatch, drivers and equipment'], ['Accountant', 'Invoices, factoring, settlements, reports'], ['Driver', 'Driver app only: assigned loads and documents']])}</div>`;
+  if (tab === 'integrations') body = `<div class="int-cards">${integrations.map(x => `<section class="card" aria-labelledby="int-${x.key}"><h3 id="int-${x.key}">${x.name} ${x.connected ? badge('Connected') : ''}</h3><p>${x.desc}</p><div>${x.connected ? `<button type="button" class="btn" data-act="disconnect" data-key="${x.key}">Disconnect</button>` : `<button type="button" class="btn primary" data-act="connect" data-key="${x.key}">Connect</button>`}</div></section>`).join('')}</div>`;
+  if (tab === 'plan') body = `<div class="card" style="max-width:760px"><h2>Current plan</h2><p>Plan: <b>${plan.name}</b></p><p>Price: <b>$${plan.price} / month</b>, billed monthly</p><p>Next billing date: <b>${fmtD(plan.next)}</b></p><p>Active trucks: <b>${trucks.filter(t => t.status !== 'Retired').length}</b> of ${plan.trucks} included</p><p>Users: <b>${users.length}</b> of ${plan.users} included</p>
+    <button type="button" class="btn primary" data-act="change-plan">Change plan</button></div><div class="card flush"><div class="card-head"><h2>Billing history</h2></div>${tableHtml(['Date', 'Description', 'Amount', 'Status'], [1, 2, 3].map(k => tr([fmtD(new Date(2026, 10 - k, 1)), `${plan.name} subscription`, [money(plan.price), 'num'], badge('Paid')])))}</div>`;
+  return { title: 'Settings', html: head('Settings', 'Company, users, integrations and your Haulr plan.') + tabsHtml('settings', [['company', 'Company'], ['users', 'Users & Roles'], ['integrations', 'Integrations'], ['plan', 'Billing & plan']], 'Settings sections') + panel('settings', body),
+    after() { const f = $('#company-form'); f && f.addEventListener('submit', async e => { e.preventDefault(); if (!validate(f)) return; const x = readForm(f); if (await commit($('[type=submit]', f), 'save_company', x, () => Object.assign(company, x), 'Company settings saved')) render(); }); } };
+}
+function pProfile() {
+  return { title: 'Profile', html: head('Your profile', 'How you appear to your team.') + `<form id="profile-form" class="card" novalidate style="max-width:560px">${fieldHtml({ name: 'name', label: 'Full name', required: true, value: 'Dana Whitfield' })}${fieldHtml({ name: 'email', label: 'Email', type: 'email', required: true, value: 'dana@haulr-demo.example' })}${fieldHtml({ name: 'phone', label: 'Mobile phone', type: 'tel', value: '(214) 555-0142' })}
+    ${fieldHtml({ name: 'notify', label: 'Email me when a load is delivered', type: 'checkbox', value: true })}<div class="actions" style="justify-content:flex-end"><button type="submit" class="btn primary">Save profile</button></div></form>`,
+    after() { const f = $('#profile-form'); f.addEventListener('submit', async e => { e.preventDefault(); if (validate(f)) await commit($('[type=submit]', f), 'save_profile', readForm(f), null, 'Profile saved'); }); } };
+}
+function loginHtml() {
+  return `<div class="login"><form class="card" id="login-form" novalidate><div class="brand"><span class="logo" aria-hidden="true">H</span>Haulr TMS</div><h1 style="margin-bottom:14px">Sign in</h1>
+    ${fieldHtml({ name: 'email', label: 'Email', type: 'email', value: 'dana@haulr-demo.example' })}${fieldHtml({ name: 'password', label: 'Password', type: 'password' })}
+    <button type="submit" class="btn primary" style="width:100%;justify-content:center">Sign in</button><p class="muted sm" style="text-align:center">This is a demo. Any password works.</p></form></div>`;
+}
+
+// ================= router =================
+const ROUTES = [[/^\/(dashboard)?$/, pDashboard], [/^\/loads$/, pLoads], [/^\/loads\/new$/, () => pLoadForm(null)], [/^\/loads\/(\d+)\/edit$/, m => pLoadForm(+m[1])], [/^\/loads\/(\d+)$/, m => pLoad(+m[1])],
+  [/^\/dispatch$/, pDispatch], [/^\/drivers$/, pDrivers], [/^\/drivers\/(\d+)$/, m => pDriver(+m[1])], [/^\/trucks$/, pTrucks], [/^\/trucks\/(\d+)$/, m => pTruck(+m[1])], [/^\/trailers$/, pTrailers],
+  [/^\/customers$/, pCustomers], [/^\/customers\/(\d+)$/, m => pCustomer(+m[1])], [/^\/billing(\/invoices)?$/, pInvoices], [/^\/billing\/invoices\/(\d+)$/, m => pInvoice(+m[1])], [/^\/billing\/factoring$/, pFactoring],
+  [/^\/driver-pay(\/settlements)?$/, pSettlements], [/^\/fuel$/, pFuel], [/^\/maintenance$/, pMaintenance], [/^\/documents$/, pDocuments], [/^\/reports$/, pReports], [/^\/settings$/, pSettings], [/^\/profile$/, pProfile]];
+const NAV = [['Operations', [['Dashboard', '#/', 'dash'], ['Loads', '#/loads', 'box'], ['Dispatch Board', '#/dispatch', 'board'], ['Drivers', '#/drivers', 'user'], ['Trucks', '#/trucks', 'truck'], ['Trailers', '#/trailers', 'trailer'], ['Customers', '#/customers', 'building']]],
+  ['Accounting', [{ key: 'billing', label: 'Billing', icon: 'dollar', items: [['Invoices', '#/billing/invoices'], ['Factoring', '#/billing/factoring']] }, { key: 'pay', label: 'Driver Pay', icon: 'wallet', items: [['Settlements', '#/driver-pay/settlements']] }]],
+  ['Compliance', [['Fuel & IFTA', '#/fuel', 'fuel'], ['Maintenance', '#/maintenance', 'wrench'], ['Documents', '#/documents', 'doc']]], ['Insights', [['Reports', '#/reports', 'chart']]]];
+const curPath = () => (location.hash.replace(/^#/, '') || '/').split('?')[0];
+const isActive = (href, path) => { const p = href.slice(1); return p === '/' ? path === '/' || path === '/dashboard' : path === p || path.startsWith(p + '/'); };
+function renderNav(path) {
+  const link = ([t, href, icon], sub) => `<li><a class="nav-link" href="${href}" ${isActive(href, path) ? 'aria-current="page"' : ''}>${sub ? '' : ic(icon)}<span class="lbl">${t}</span></a></li>`;
+  $('#nav').innerHTML = NAV.map(([h, items]) => `<div class="nav-h">${h}</div><ul style="list-style:none;margin:0;padding:0">${items.map(it => {
+    if (Array.isArray(it)) return link(it);
+    const active = it.items.some(x => isActive(x[1], path)), openG = S.navOpen[it.key] != null ? S.navOpen[it.key] : active;
+    return `<li><button type="button" class="nav-group" aria-expanded="${openG}" aria-controls="navg-${it.key}" data-act="navgroup" data-key="${it.key}">${ic(it.icon)}<span class="lbl">${it.label}</span><span class="chev">${ic('chev', 14)}</span></button>
+      <ul class="nav-sub" id="navg-${it.key}" ${openG ? '' : 'hidden'}>${it.items.map(x => link(x, true)).join('')}</ul></li>`; }).join('')}</ul>`).join('');
+  $('#side-foot').innerHTML = `<a class="nav-link" href="#/settings" ${isActive('#/settings', path) ? 'aria-current="page"' : ''}>${ic('gear')}<span class="lbl">Settings</span></a>
+    <button type="button" class="icon-btn" aria-label="${$('#app').classList.contains('collapsed') ? 'Expand sidebar' : 'Collapse sidebar'}" data-act="collapse">${ic('menu')}</button>`;
+}
+let lastPath = null;
+function render() {
+  closeFloating();
+  const path = curPath();
+  if (path !== lastPath) while (stack.length) stack[stack.length - 1].close();
+  if (path === '/login') {
+    $('#app').hidden = true; $('#login').hidden = false; $('#login').innerHTML = loginHtml(); document.title = 'Sign in · Haulr TMS';
+    $('#login-form').addEventListener('submit', e => { e.preventDefault(); location.hash = '#/'; }); lastPath = path; return;
+  }
+  $('#app').hidden = false; $('#login').hidden = true; $('#login').innerHTML = '';
+  let out = null;
+  for (const [re, fn] of ROUTES) { const m = path.match(re); if (m) { out = fn(m); break; } }
+  if (!out) out = { title: 'Page not found', html: head('Page not found', `There's nothing at <code>${esc(path)}</code>. <a href="#/">Back to the dashboard</a>.`) };
+  $('#main').innerHTML = out.html; document.title = `${out.title} · Haulr TMS`;
+  renderNav(path); renderBell();
+  if (out.after) out.after();
+  if (path !== lastPath) $('#main').scrollTop = 0;
+  lastPath = path;
+}
+window.addEventListener('hashchange', render);
+
+// ================= events (delegated) =================
+const ACT = {
+  menu: el => showFloating(el, MENUS[el.dataset.menu]()),
+  'load-menu': el => showFloating(el, MENUS.load(+el.dataset.id)),
+  'load-more': el => showFloating(el, MENUS.loadMore(+el.dataset.id)),
+  'inv-menu': el => showFloating(el, MENUS.invoice(+el.dataset.id)),
+  bell: el => showFloating(el, bellHtml(), { focus: false }),
+  help: el => showFloating(el, `<div class="popover" role="dialog" aria-label="Help"><div class="pop-head"><h2 style="margin:0">Help</h2></div><div class="pop-body"><p style="margin-top:0">Questions about loads, dispatch or billing? Our support team answers within one business day.</p><p class="muted sm">support@haulr.example · (800) 555-0199</p></div></div>`, { focus: false }),
+  columns: el => showFloating(el, `<div class="popover" role="dialog" aria-label="Visible columns" style="width:220px"><div class="pop-body">${[['truck', 'Truck'], ['miles', 'Miles'], ['rpm', 'Rate per mile']].map(([k, t]) => `<div class="field check"><input type="checkbox" id="col-${k}" data-col="${k}" ${S.loads.hide.has(k) ? '' : 'checked'}><label for="col-${k}">${t}</label></div>`).join('')}</div></div>`, { focus: false }),
+  'close-pop': () => closeFloating(),
+  chip: el => chipPopover(el, +el.dataset.id),
+  logout: () => { location.hash = '#/login'; },
+  collapse: () => { $('#app').classList.toggle('collapsed'); renderNav(curPath()); },
+  navgroup: el => { const k = el.dataset.key, now = el.getAttribute('aria-expanded') !== 'true'; S.navOpen[k] = now; el.setAttribute('aria-expanded', String(now)); $('#navg-' + k).hidden = !now; },
+  tab: el => { const g = el.dataset.group, t = el.dataset.tab; if (g === 'lstatus') { S.loads.status = t; S.loads.page = 1; } else S.tabs[g] = t; render(); const b = $(`#tab-${g}-${t}`); b && b.focus({ preventScroll: true }); },
+  page: el => { S.loads.page += +el.dataset.d; $('#loads-results').innerHTML = loadsResults(); },
+  sel: el => { el.checked ? S.loads.sel.add(+el.dataset.id) : S.loads.sel.delete(+el.dataset.id); $('#loads-results').innerHTML = loadsResults(); },
+  selall: el => { $$('[data-act=sel]').forEach(c => el.checked ? S.loads.sel.add(+c.dataset.id) : S.loads.sel.delete(+c.dataset.id)); $('#loads-results').innerHTML = loadsResults(); },
+  'clear-filters': () => { Object.assign(S.loads, { q: '', customer: '', equip: '', from: '', page: 1 }); render(); },
+  week: el => { S.week = +el.dataset.d === 0 ? 0 : S.week + +el.dataset.d; render(); },
+  refresh: () => render(),
+  dispatch: el => { closeFloating(); dispatchDialog(+el.dataset.id); },
+  'new-driver': () => { if (curPath() !== '/drivers') { location.hash = '#/drivers'; } setTimeout(() => driverDrawer(null), 0); },
+  'edit-driver': el => driverDrawer(+el.dataset.id),
+  'new-truck': () => simpleCreate('truck')(), 'new-trailer': () => simpleCreate('trailer')(), 'new-customer': () => simpleCreate('customer')(),
+  'new-fuel': () => simpleCreate('fuel')(), 'new-service': el => simpleCreate('service')(el.dataset.truck ? { truckId: el.dataset.truck } : {}),
+  upload: el => simpleCreate('upload')(el.dataset.load ? { loadId: el.dataset.load } : {}), invite: () => simpleCreate('invite')(),
+  'new-invoice': el => invoiceDialog(el.dataset.load ? +el.dataset.load : ''),
+  'new-settlement': () => settlementWizard(), 'change-plan': () => planDialog(),
+  'load-dup': el => { const l = loadById(el.dataset.id), id = nextId(loads, 1020);
+    commit(null, 'duplicate_load', { id: l.id, newId: id }, () => loads.push({ ...l, id, status: 'available', driverId: null, truckId: null, trailerId: null, extra: [...l.extra], history: [[TODAY, `Duplicated from load ${l.id}`]] }), `Load ${l.id} duplicated as ${id}`).then(ok => ok && render()); },
+  'load-del': el => { const id = +el.dataset.id; confirmDialog({ title: 'Delete load', message: `Are you sure you want to delete load ${id}?`, confirm: 'Delete', action: 'delete_load', data: { id },
+    apply: () => { loads.splice(loads.findIndex(l => l.id === id), 1); S.loads.sel.delete(id); if (curPath().startsWith('/loads/' + id)) history.replaceState(null, '', '#/loads'); }, okMsg: `Load ${id} deleted` }); },
+  'inv-view': el => { location.hash = '#/billing/invoices/' + el.dataset.id; },
+  'inv-paid': el => { const v = invById(el.dataset.id); commit(el.tagName === 'BUTTON' ? el : null, 'mark_invoice_paid', { id: v.id, amount: v.amount }, () => { v.status = 'Paid'; }, `INV-${v.id} marked as paid`).then(ok => ok && render()); },
+  'inv-factor': el => { const v = invById(el.dataset.id); commit(el.tagName === 'BUTTON' ? el : null, 'send_to_factoring', { id: v.id, loadId: v.loadId, amount: v.amount }, () => { v.status = 'Factored'; }, `INV-${v.id} sent to factoring`).then(ok => ok && render()); },
+  'inv-void': el => { const v = invById(el.dataset.id); confirmDialog({ title: 'Void invoice', message: `Are you sure you want to void invoice INV-${v.id}?`, confirm: 'Void invoice', action: 'void_invoice', data: { id: v.id }, apply: () => { v.status = 'Void'; }, okMsg: `INV-${v.id} voided` }); },
+  connect: el => { const x = integrations.find(i => i.key === el.dataset.key); commit(el, 'connect_integration', { integration: x.key }, () => { x.connected = true; }, `${x.name} connected`).then(ok => ok && render()); },
+  disconnect: el => { const x = integrations.find(i => i.key === el.dataset.key); commit(el, 'disconnect_integration', { integration: x.key }, () => { x.connected = false; }, `${x.name} disconnected`).then(ok => ok && render()); },
+  'mark-read': el => commit(el, 'mark_notifications_read', { count: notifications.filter(n => n.unread).length }, () => notifications.forEach(n => { n.unread = false; }), 'All notifications marked as read').then(ok => { if (ok) { closeFloating(); renderBell(); } }),
+  report: el => { S.report = el.dataset.key; render(); },
+  'run-report': () => { $('#report-out').innerHTML = reportTable(S.report); toast('Report updated'); },
+  'add-stop': () => { const box = $('#extra-stops'); box.insertAdjacentHTML('beforeend', extraStopHtml(box.children.length + 3)); const s = box.lastElementChild.querySelector('select'); s && s.focus(); },
+  'remove-stop': el => { el.closest('[data-stop]').remove(); $$('#extra-stops [data-stop]').forEach((b, i) => { $('.stop-title', b).textContent = `Stop ${i + 3}`; $('[data-act=remove-stop]', b).setAttribute('aria-label', `Remove stop ${i + 3}`); }); },
+  cselect: el => { const list = el.parentElement.querySelector('[role=listbox]'), now = list.hidden; closeCselects(); list.hidden = !now; el.setAttribute('aria-expanded', String(now)); if (now) (list.querySelector('[aria-selected=true]') || list).focus(); },
+  coption: el => { const box = el.closest('[data-cselect]'), v = el.dataset.value; box.querySelector('input[type=hidden]').value = v; box.querySelector('.val').textContent = v;
+    $$('[role=option]', box).forEach(o => o.setAttribute('aria-selected', String(o === el))); closeCselects(); const b = box.querySelector('.cselect-btn'); b.removeAttribute('aria-invalid'); box.querySelector('.err').hidden = true; b.focus(); },
+  'dlg-close': el => { const rec = stack.find(r => r.root.contains(el)); rec && rec.close(); },
+};
+function closeCselects() { $$('[data-cselect] [role=listbox]').forEach(l => { l.hidden = true; l.parentElement.querySelector('.cselect-btn').setAttribute('aria-expanded', 'false'); }); }
+const OPENERS = new Set(['menu', 'load-menu', 'load-more', 'inv-menu', 'bell', 'help', 'columns', 'chip']);
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-act]'), act = el && el.dataset.act;
+  if (!e.target.closest('[data-cselect]')) closeCselects();
+  if (open && !open.el.contains(e.target)) { const same = open.trigger === el; closeFloating(); if (same && OPENERS.has(act)) return; }
+  if (!el || el.getAttribute('aria-disabled') === 'true' || el.disabled) return;
+  if (el.closest('#layer') && el.matches('[role=menuitem]')) closeFloating();
+  if (ACT[act]) { if (el.tagName === 'A') e.preventDefault(); ACT[act](el, e); }
+});
+document.addEventListener('change', e => {
+  const t = e.target;
+  if (t.dataset.col) { t.checked ? S.loads.hide.delete(t.dataset.col) : S.loads.hide.add(t.dataset.col); $('#loads-results').innerHTML = loadsResults(); return; }
+  if (t.dataset.filter && t.dataset.filter !== 'q') { S.loads[t.dataset.filter] = t.dataset.filter === 'per' ? +t.value : t.value; S.loads.page = 1; $('#loads-results').innerHTML = loadsResults(); }
+  if (t.dataset.dfilter === 'status') { S.drivers.status = t.value; render(); }
+  if (t.dataset.ifilter === 'status') { S.inv.status = t.value; render(); }
+  if (t.dataset.docfilter) { S.docs.type = t.value; render(); }
+  if (t.dataset.rfilter) { S.reportRange = t.value; }
+});
+document.addEventListener('input', e => {
+  const t = e.target;
+  if (t.dataset.filter === 'q') { S.loads.q = t.value; S.loads.page = 1; $('#loads-results').innerHTML = loadsResults(); }
+  const keep = (key, obj) => { obj.q = t.value; const pos = t.selectionStart; render(); const n = $(`[${key}=q]`); if (n) { n.focus(); n.setSelectionRange(pos, pos); } };
+  if (t.dataset.dfilter === 'q') keep('data-dfilter', S.drivers);
+  if (t.dataset.ifilter === 'q') keep('data-ifilter', S.inv);
+  if (t.id === 'gsearch') globalSearch(t.value);
+});
+document.addEventListener('keydown', e => {
+  const t = e.target;
+  if ((e.key === 'Enter' || e.key === ' ') && t.matches('div[role=button], div[role=menuitem], li[role=option]')) { e.preventDefault(); t.click(); return; }
+  if (e.key === 'Escape') {
+    if (!$('#gsearch-list').hidden) { $('#gsearch-list').hidden = true; $('#gsearch').setAttribute('aria-expanded', 'false'); return; }
+    if ($$('[data-cselect] [role=listbox]').some(l => !l.hidden)) { closeCselects(); return; }
+    if (open) { const tr = open.trigger; closeFloating(); tr && tr.focus(); return; }
+    const top = stack[stack.length - 1]; if (top && top.kind !== 'native') { top.close(); }
+    return;
+  }
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && open && open.el.contains(t)) {
+    const items = $$('[role=menuitem]:not([aria-disabled=true])', open.el), i = items.indexOf(t); if (!items.length) return; e.preventDefault();
+    items[(i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length].focus();
+  }
+  if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && t.getAttribute('role') === 'tab') {
+    const tabs = $$('[role=tab]', t.parentElement), i = tabs.indexOf(t); tabs[(i + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length].click();
+  }
+  if (e.key === 'Enter' && t.id === 'gsearch') { const first = $('#gsearch-list [role=option]'); if (first) { e.preventDefault(); location.hash = first.getAttribute('href'); t.value = ''; globalSearch(''); } }
+});
+function globalSearch(q) {
+  const list = $('#gsearch-list'), s = q.trim().toLowerCase();
+  if (!s) { list.hidden = true; $('#gsearch').setAttribute('aria-expanded', 'false'); return; }
+  const hits = [...loads.filter(l => `${l.id} ${l.ref} ${cust(l.customerId).name} ${place(l.o)} ${place(l.d)}`.toLowerCase().includes(s)).slice(0, 4).map(l => [`#/loads/${l.id}`, `Load ${l.id} · ${place(l.o)} → ${place(l.d)}`, 'Load']),
+    ...drivers.filter(d => dname(d).toLowerCase().includes(s)).slice(0, 3).map(d => [`#/drivers/${d.id}`, dname(d), 'Driver']), ...trucks.filter(t => t.unit.includes(s)).slice(0, 2).map(t => [`#/trucks/${t.id}`, `Truck ${t.unit}`, 'Truck']),
+    ...customers.filter(c => c.name.toLowerCase().includes(s)).slice(0, 3).map(c => [`#/customers/${c.id}`, c.name, 'Customer']), ...invoices.filter(i => `inv-${i.id}`.includes(s)).slice(0, 2).map(i => [`#/billing/invoices/${i.id}`, `INV-${i.id}`, 'Invoice'])];
+  list.innerHTML = hits.length ? hits.map(([h, t, k]) => `<a role="option" href="${h}" aria-selected="false">${esc(t)}<span class="muted sm">${k}</span></a>`).join('') : `<div class="muted" style="padding:8px 10px">No results for “${esc(q)}”</div>`;
+  list.hidden = false; $('#gsearch').setAttribute('aria-expanded', 'true');
+}
+$('#gsearch-list').addEventListener('click', e => { if (e.target.closest('[role=option]')) { $('#gsearch').value = ''; globalSearch(''); } });
+$('#gsearch').addEventListener('blur', () => setTimeout(() => { if (!$('#gsearch-list').contains(document.activeElement)) globalSearch(''); }, 150));
+$('#main').addEventListener('scroll', () => { if (open && !open.el.matches('.popover') && Date.now() - open.at > 400) closeFloating(); }, { passive: true });
+
+// Test hook (dev/rows-harness.mjs): swap in "another customer's" records without a page load.
+window.__tmsTest = { loads, invoices, drivers, customers, trucks, render };
+render();
+})();
+</script>
+<script src="/scopos.js" data-endpoint="/api/scopos" data-product="Haulr TMS, trucking transportation management" data-learn></script>
+</body>
+</html>

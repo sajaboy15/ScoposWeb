@@ -36,6 +36,7 @@
     quiet(() => rt.onMessage.removeListener(onMessage));
     document.removeEventListener('scopos:content-takeover', check);
     document.removeEventListener('visibilitychange', check);
+    quiet(() => { clearInterval(routeTimer); clearTimeout(observeT); window.removeEventListener('popstate', routeTick); window.removeEventListener('hashchange', routeTick); });
     quiet(() => S.guide && S.guide.stop(false));
     quiet(() => S.recorder && S.recorder.active && S.recorder.active() && S.recorder.stop());
     quiet(() => S.pointer && S.pointer.recording && S.pointer.recording(false));
@@ -60,12 +61,32 @@
     try { return S.scan({ query }); } catch (e) { return S.scan(); }
   };
 
-  function startGuide(steps, index, missingDelay) {
+  // The guide's current steps (it may have grown during the run); guide.js provides steps() when it supports `more`.
+  const guideSteps = () => { try { return S.guide.steps ? S.guide.steps() : null; } catch (e) { return null; } };
+  let lastSteps = null;
+
+  function startGuide(steps, index, missingDelay, { live = false, name = '' } = {}) {
+    lastSteps = steps;
     S.guide.start(steps, {
       index,
       missingDelay,
+      live: !!live,
       onChange: ({ index: i }) => send({ type: 'guide:change', index: i }),
-      onEnd: reason => send({ type: 'guide:end', reason }),
+      onEnd: reason => {
+        const now = guideSteps() || lastSteps;
+        send({ type: 'guide:end', reason, steps: Array.isArray(now) ? now : undefined });
+      },
+      // A live guide ran out of steps ('end'), or a step's control is not on this page ('missing'): the worker
+      // asks Claude for the rest from this page (at most once per reason per run) and returns runnable steps or null.
+      more: async ({ index: i, reason, done } = {}) => {
+        const cur = guideSteps() || lastSteps || [];
+        const doneList = Array.isArray(done) ? done : cur.slice(0, i).map(st => st && st.instruction).filter(Boolean);
+        const query = [name, ...doneList.slice(-2)].filter(Boolean).join(' ');
+        const res = await send({ type: 'guide:more', index: i, reason: reason === 'missing' ? 'missing' : 'end', done: doneList, page: scan(query), name });
+        return res && Array.isArray(res.steps) ? res.steps : null;
+      },
+      // The whole list after `more` changed it: the worker keeps it, so a page load resumes on the longer guide.
+      onSteps: steps => { if (Array.isArray(steps)) { lastSteps = steps; send({ type: 'guide:steps', steps }); } },
       onMissing: async (step, i) => {
         // A step whose control lives on another page is not "missing" here: the user just isn't there yet.
         if (step.target && step.target.path && !samePage(step.target.path)) return null;
@@ -111,15 +132,48 @@
     guard: { on: guardOn, off: guardOff },
   };
 
-  async function startExplore(restart) {
+  // netBlocked: the worker's network-level write block is up for this tab (told on start and on every resume).
+  async function startExplore(restart, net) {
     if (S.explore.running && S.explore.running()) {
       if (!restart) return;
       S.explore.stop();
       for (let i = 0; i < 30 && S.explore.running(); i++) await new Promise(r => setTimeout(r, 100));
     }
     await guardOn();
-    S.explore.start(exploreOpts);
+    S.explore.start({ ...exploreOpts, netBlocked: !!net });
   }
+
+  // ---------- passive learning: on each screen the user opens, a 0-token snapshot grows the product map ----------
+  // Only when the site has a map (the worker says so), never while a guide or the explorer runs, at most once per
+  // screen in 10 minutes (the worker keeps the authoritative throttle across page loads).
+  const OBSERVE_DELAY = 1500, OBSERVE_EVERY = 10 * 60 * 1000;
+  const observedHere = new Map();
+  let routeHref = '', observeT = 0;
+  const screenKey = () => { try { return S.explore && S.explore.pageKey ? S.explore.pageKey() : location.pathname; } catch (e) { return location.pathname; } };
+  const busyHere = () => { try { return !!((S.explore && S.explore.running && S.explore.running()) || (S.guide && S.guide.state && S.guide.state()) || (S.recorder && S.recorder.active && S.recorder.active())); } catch (e) { return true; } };
+  async function observeScreen() {
+    if (dead || document.hidden || !S.explore || typeof S.explore.snapshot !== 'function' || busyHere()) return;
+    const key = screenKey();
+    if (Date.now() - (observedHere.get(key) || 0) < OBSERVE_EVERY) return;
+    const r = await send({ type: 'map:want', key });
+    if (!r || !r.ok || busyHere() || screenKey() !== key) return;
+    observedHere.set(key, Date.now());
+    // A snapshot costs 50-250 ms of main thread on a big screen: only when the browser is idle.
+    await new Promise(r => (typeof requestIdleCallback === 'function' ? requestIdleCallback(r, { timeout: 4000 }) : setTimeout(r, 200)));
+    if (dead || busyHere() || screenKey() !== key) return;
+    let view = null;
+    try { view = await S.explore.snapshot(); } catch (e) { view = null; }
+    if (view && Array.isArray(view.controls) && !dead) send({ type: 'map:observe', view });
+  }
+  function routeTick() {
+    if (dead || location.href === routeHref) return;
+    routeHref = location.href;
+    clearTimeout(observeT);
+    observeT = setTimeout(observeScreen, OBSERVE_DELAY);
+  }
+  const routeTimer = setInterval(routeTick, 1000);
+  window.addEventListener('popstate', routeTick);
+  window.addEventListener('hashchange', routeTick);
 
   function onMessage(msg, _sender, reply) {
     try {
@@ -127,7 +181,7 @@
         case 'ping': reply({ ok: true }); break;
         case 'scan': reply(scan(msg.query || '')); break;
         case 'describe': reply((msg.ids || []).map(id => { if (id == null) return null; const el = S.byId(id); return el ? S.describe(el) : null; })); break;
-        case 'guide:start': startGuide(msg.steps, msg.index || 0, msg.missingDelay); reply({ ok: true }); break;
+        case 'guide:start': startGuide(msg.steps, msg.index || 0, msg.missingDelay, { live: msg.live, name: msg.name }); reply({ ok: true }); break;
         case 'guide:go': S.guide.go(msg.index); reply({ ok: true }); break;
         case 'guide:stop': S.guide.stop(false); reply({ ok: true }); break;
         case 'record:start':
@@ -140,7 +194,7 @@
           S.pointer.recording(false);
           reply({ steps: S.recorder.stop() });
           break;
-        case 'explore:start': startExplore(!!msg.restart); reply({ ok: true }); break;
+        case 'explore:start': startExplore(!!msg.restart, !!msg.net); reply({ ok: true }); break;
         case 'explore:stop': S.explore.stop(); guardOff(); reply({ ok: true }); break; // "Хватит": guides from what was seen
         case 'explore:cancel': S.explore.stop(true); guardOff(); reply({ ok: true }); break; // "Отменить": nothing is written
         default: return false;
@@ -154,10 +208,13 @@
 
   // A walk that was running before this page load continues here, with the guard back on first.
   (async () => {
-    const st = ((await send({ type: 'explore:load' })) || {}).st;
-    if (st && st.status === 'running') { await guardOn(); S.explore.resume(exploreOpts); }
+    const res = (await send({ type: 'explore:load' })) || {};
+    if (res.st && res.st.status === 'running') { await guardOn(); S.explore.resume({ ...exploreOpts, netBlocked: !!res.net }); }
   })();
 
   // Resume a walkthrough that continues on this page.
-  send({ type: 'resume' }).then(res => { if (res && res.steps) startGuide(res.steps, res.index, res.missingDelay); });
+  send({ type: 'resume' }).then(res => {
+    if (res && res.steps) startGuide(res.steps, res.index, res.missingDelay, { live: res.live, name: res.name });
+    routeTick(); // this page load is a screen visit too (skipped while the guide runs)
+  });
 })();

@@ -22,6 +22,9 @@
 </nav>
 
 <main>
+  <!-- no access to the page in front: why, and the way out -->
+  <div class="access" id="access" hidden></div>
+
   <!-- ask -->
   <section class="view" id="view-ask">
     <div class="feed" id="feed"></div>
@@ -45,7 +48,7 @@
   <!-- settings -->
   <section class="view" id="view-set" hidden>
     <h2>Ключ Claude</h2>
-    <p class="muted">Scopos отвечает через Claude. Ключ хранится только в этом браузере и уходит только в API Anthropic. Создать его можно на console.anthropic.com в разделе API keys.</p>
+    <p class="muted">Scopos отвечает через Claude. Ключ хранится только в этом браузере и уходит только в API Anthropic. Создать его можно на console.anthropic.com в разделе API keys. Если запущен локальный сервер Scopos с ключом, свой ключ не нужен.</p>
     <div class="keyrow">
       <input id="key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-…" aria-label="Ключ Anthropic API">
       <button class="btn main" id="key-save">Сохранить</button>
@@ -57,10 +60,19 @@
 
     <h2>Быстрый вызов</h2>
     <p class="muted"><kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> открывает панель. Поменять сочетание можно на странице chrome://extensions/shortcuts.</p>
+    <h2>Лимит в месяц</h2>
+    <p class="muted">Сколько Scopos может потратить на Claude за календарный месяц. Когда лимит исчерпан, работают готовые гайды и ответы из кэша, а новые вопросы ждут следующего месяца.</p>
+    <div class="limitrow">
+      <span class="cur">$</span><input id="limit" type="number" min="0" step="0.5" inputmode="decimal" aria-label="Лимит в долларах в месяц">
+      <span class="month" id="month"></span>
+    </div>
+    <label class="toggle"><input type="checkbox" id="auto-guides"><span>Дописывать гайды самому, когда я открываю новые экраны изученного сайта (не чаще раза в день)</span></label>
+
     <h2>Расход</h2>
     <div id="usage"></div>
 
-    <p class="faint small">Отвечает Claude Sonnet 5.5, кнопки после изменений интерфейса находит Claude Haiku 5.5, гайды пишет Claude Opus 5.5 · Scopos 0.1.0</p>
+    <p class="faint small">Отвечает Claude Sonnet 5.5, кнопки после изменений интерфейса находит Claude Haiku 5.5, гайды пишет Claude Opus 5.5.</p>
+    <p class="ver" id="ver">Scopos 0.2.0</p>
   </section>
 </main>
 

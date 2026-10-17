@@ -13,6 +13,15 @@
  *   per call sits inside it;
  * - when the map is too big, only the views relevant to the question are sent;
  * - everything from the page is wrapped as untrusted data, never as instructions.
+ *
+ * Learning guides (complete, end to end):
+ *   const bodies = buildLearnBatches({ map, product, existing });   // 1 body for a small map, N for a big one
+ *   let guides = [];
+ *   for (const b of bodies) guides = mergeGuides(guides, finishGuides(await call(b, key, opts), map));
+ *   // guides: [{ name, steps, live }]; run a live one with Scopos.guide.start(steps, { live: true, more })
+ * Live continuation (a live guide ran out of steps, or a step can't be found on the page):
+ *   askSteps(await call(buildContinue({ guideName, page, done }), key, opts), descriptors, guideName)
+ * call(body, key, { endpoint }) sends to a Scopos server proxy instead; with no key, no credentials at all.
  */
 (function (root) {
   const MODELS = { ask: 'claude-sonnet-5-5', locate: 'claude-haiku-5-5', learn: 'claude-opus-5-5' };
@@ -91,7 +100,7 @@ ${UNTRUSTED}`;
   function buildAsk({ question, page, history = [], product = '', progress = [] }) {
     const messages = cleanHistory(history);
     const done = progress.length
-      ? `\n\nthe user is in the middle of this task and already did:\n${progress.map((p, i) => `${i + 1}. ${capText(p, 160)}`).join('\n')}\nthe page above is where they are now. return only the remaining steps, starting from this page.`
+      ? `\n\nthe user is in the middle of this task and already did:\n${progress.slice(-30).map((p, i) => `${i + 1}. ${capText(p, 160)}`).join('\n')}\nthe page above is where they are now. return only the remaining steps, starting from this page, up to the control that finishes the task (save, create, send). if nothing is left to do, return no steps.`
       : '';
     messages.push({
       role: 'user',
@@ -111,6 +120,29 @@ ${UNTRUSTED}`;
       content: `${pageText(page)}\n\nwhich control on this page does this step mean? step: "${capText(instruction, 160)}". it used to be labeled "${capText(oldText, 80)}".${hint} answer with its id, or null if it is not on this page.`,
     }];
     return body('locate', `you match a guide step to a control on a web page. answer only with the id from the page.\n\n${UNTRUSTED}`, messages, LOCATE_SCHEMA, { effort: 'low', maxTokens: 2000 });
+  }
+
+  /**
+   * Live continuation of a guide: the remaining steps from the page the user is on now.
+   * Used when a guide flagged live reaches its last step, or a step's control can't be found.
+   * Same request as a question with progress (ask model, low effort, page ids); turn the reply
+   * into runnable steps with askSteps(out, descriptors, question).
+   */
+  function buildContinue({ question, guideName, page, done = [], product = '' }) {
+    const task = String(question || guideName || '').trim() || 'finish the task';
+    return buildAsk({ question: task, page, product, progress: (done || []).filter(s => typeof s === 'string' && s.trim()) });
+  }
+
+  /**
+   * Steps from a page-based reply (buildAsk / buildContinue): descriptors[i] is the descriptor of
+   * out.steps[i].element_id on the page (content script: Scopos.describeMany), or null.
+   */
+  function askSteps(out, descriptors, question = '') {
+    return ((out && out.steps) || []).map((st, i) => ({
+      instruction: capText(st.instruction, 200), action: st.action,
+      value: safeValue(st.value, question, null),
+      target: (descriptors && descriptors[i]) || (st.element_text ? { sel: [], text: capText(st.element_text, 80), role: null } : null),
+    }));
   }
 
   // ---------------- product map: learned once by the explorer ----------------
@@ -140,8 +172,14 @@ ${UNTRUSTED}`;
         type: 'array',
         items: {
           type: 'object',
-          properties: { name: { type: 'string' }, steps: { type: 'array', items: REF_STEP } },
-          required: ['name', 'steps'],
+          properties: {
+            name: { type: 'string' },
+            steps: { type: 'array', items: REF_STEP },
+            // The map does not hold the end of this task (it goes through a control the study did not open):
+            // the guide ends at that control and the rest is planned live on the user's screen.
+            continues_live: { type: 'boolean' },
+          },
+          required: ['name', 'steps', 'continues_live'],
           additionalProperties: false,
         },
       },
@@ -155,10 +193,14 @@ ${UNTRUSTED}`;
   const MAP_SYSTEM = `you are Scopos, a guide that lives inside a software product. you studied the product by walking through every screen, and you help its users get things done.
 
 the product map lists every screen (page), dialog and panel, as
-VIEW <id> <kind> "<title>" <address>
+VIEW <id> <kind> "<title>" <address> · form · one record
   facts: <short text the screen shows> | …
-  <ref> <role> "<name>" · <section> · <state> · options: a | b → <id of the view it opens>
-controls under GLOBAL are on every page (navigation). a control with → opens that view.
+  <ref> <role> "<name>" · one per row · <section> · <state> · options: a | b · commit · not opened → <id of the view it opens>
+controls under GLOBAL are on every page (navigation). a control with → opens that view. "· form" marks a view where the user fills in a form.
+"· commit" marks the control that finishes a form or dialog (save, create, send). "· not opened" marks a control the study did not press: what it opens is not in the map.
+"· one per row" marks a control repeated in every row of a table or list, one per record (a row's ⋯ actions button, its Edit button, the record's own link). its name shows only the part every row shares ("Actions for load …", "Edit …"), or, for a link that is the record itself, the column it sits in ("Load #", "Name"). the rows hold the user's own records, which differ from the ones the study saw.
+"· one record" marks the screen, dialog or menu of one record (its address has :id, or a · one per row control opens it). the study opened it for a sample record, so its title, facts and the names in it belong to that sample, not to the user's data.
+controls with role table, list or region are areas of the screen that show data.
 facts are what the screen showed while it was studied (labels with values, such as the current plan or a date). answer questions about what the product shows from them and name the screen; when no fact says it, say which screen to look at instead of guessing.
 to reach a view, follow the → links from where the user is. dialogs and panels open from their opener control.
 
@@ -168,12 +210,18 @@ STEPS
 - instruction is one short sentence naming the control the way it is labeled: "Нажмите «Новый счёт»".
 - action: click, type, select, or look.
 - value: when the user named what to enter, put it here: for a select, the matching option exactly as written in its options; for a text field, the text. otherwise null.
-- in a form, include the fields the user has to fill and the button that finishes the task.
+- in a form, include every field the task needs and end with the control that finishes it (· commit, or the form's save, create or send button).
+- a step that only shows something (look) points at the table, list or region that shows it, or at its heading.
+- a step on a control marked · one per row names the generic action and tells the user to pick the record they need, in the interface language: "Click ⋯ (Actions) on the load you need", «Нажмите «⋯» у нужного груза», "Open the driver you need from the Name column". never name a record from the map (a number, a person, a company, a unit): the user's records are different. the same for a · one record screen: «the load's page», never "Load 1066".
+- when the way goes through a control marked · not opened, the steps end with a click on that control: never invent what it opens.
 write in the product's interface language. no markdown.
 
 ${UNTRUSTED}`;
 
-  const lineOf = c => `  ${c.ref} ${c.role} "${capText(c.name, 70)}"${c.section ? ' · ' + capText(c.section, 40) : ''}${c.state ? ' · ' + capText(c.state, 40) : ''}${c.options && c.options.length ? ' · options: ' + c.options.slice(0, 15).map(o => capText(o, 40)).join(' | ') : ''}${c.to ? ' → ' + c.to : ''}`;
+  // Page text can't close the <product_map> block: no angle brackets in anything rendered from the page.
+  const safe = (s, n) => capText(String(s == null ? '' : s).replace(/[<>]/g, ' '), n);
+  // A row control shows its generic label (rowLabel), never the sample record's.
+  const lineOf = c => `  ${c.ref} ${c.role} "${safe(c.row && c.rowLabel ? c.rowLabel : c.name, 70)}"${c.row ? ' · one per row' : ''}${c.section ? ' · ' + safe(c.section, 40) : ''}${c.state ? ' · ' + safe(c.state, 40) : ''}${c.options && c.options.length ? ' · options: ' + c.options.slice(0, 15).map(o => safe(o, 40)).join(' | ') : ''}${c.commit ? ' · commit' : ''}${c.unexplored ? ' · not opened' : ''}${c.to ? ' → ' + c.to : ''}`;
 
   function splitGlobal(map) {
     const pages = map.views.filter(v => v.kind === 'page');
@@ -205,14 +253,27 @@ ${UNTRUSTED}`;
     .map(f => f.replace(/[<>|]/g, ' ').replace(/[    ]/g, ' ').replace(/\s+/g, ' ').trim()).filter(factOk)
     .slice(0, FACT_N).map(f => capText(f, FACT_LEN));
 
-  function viewText(v, isGlobal) {
+  // Views a row control opens (a record's menu or dialog: "Edit driver: Marcus Reed") show one sample record too.
+  const rowOpened = map => { const refs = new Set(); map.views.forEach(v => v.controls.forEach(c => { if (c.row) refs.add(c.ref); })); return v => !!(v.opener && refs.has(v.opener)); };
+  function viewText(v, isGlobal, fromRow) {
     const where = v.kind === 'page' ? v.key : `opens from ${v.opener} on ${v.parent}`;
     const facts = factsOf(v);
     return [
-      `VIEW ${v.id} ${v.kind} "${capText(v.title, 80)}" ${capText(where, 120)}`,
+      `VIEW ${v.id} ${v.kind} "${safe(v.title, 80)}" ${safe(where, 120)}${v.form ? ' · form' : ''}${(v.kind === 'page' && /(^|[/#]):id(?=$|[/?#])/.test(v.key || '')) || (fromRow && fromRow(v)) ? ' · one record' : ''}`,
       ...(facts.length ? [`  facts: ${facts.join(' | ')}`] : []),
       ...v.controls.filter(c => v.kind !== 'page' || !isGlobal(c)).slice(0, 120).map(lineOf),
     ].join('\n');
+  }
+
+  function globalHead(map) {
+    const { sig, global } = splitGlobal(map);
+    const isGlobal = c => global.has(sig(c));
+    const head = [];
+    if (global.size) {
+      const first = map.views.find(v => v.kind === 'page' && v.controls.some(isGlobal));
+      head.push('GLOBAL (on every page, refs from ' + first.id + ')', ...first.controls.filter(isGlobal).map(lineOf));
+    }
+    return { isGlobal, head };
   }
 
   /**
@@ -221,14 +282,9 @@ ${UNTRUSTED}`;
    * titles or controls share words with the question.
    */
   function mapText(map, { question = '', current = null, budget = MAP_BUDGET } = {}) {
-    const { sig, global } = splitGlobal(map);
-    const isGlobal = c => global.has(sig(c));
-    const head = [];
-    if (global.size) {
-      const first = map.views.find(v => v.kind === 'page' && v.controls.some(isGlobal));
-      head.push('GLOBAL (on every page, refs from ' + first.id + ')', ...first.controls.filter(isGlobal).map(lineOf));
-    }
-    const blocks = map.views.map(v => ({ v, text: viewText(v, isGlobal) }));
+    const { isGlobal, head } = globalHead(map);
+    const fromRow = rowOpened(map);
+    const blocks = map.views.map(v => ({ v, text: viewText(v, isGlobal, fromRow) }));
     const full = [...head, ...blocks.map(b => b.text)].join('\n');
     if (full.length <= budget) return { text: full, complete: true };
     // Over budget: rank views by relevance and keep what fits.
@@ -250,17 +306,275 @@ ${UNTRUSTED}`;
     return { text: [...head, ...blocks.filter(b => keep.has(b.v.id)).map(b => b.text)].join('\n'), complete: false };
   }
 
+  const CACHE_1H = { cache_control: { type: 'ephemeral', ttl: '1h' } };
   function mapSystem(map, opts) {
     const m = mapText(map, opts);
     // A complete map is identical for every request about this product: cache it for an hour.
-    const cache = m.complete ? { cache_control: { type: 'ephemeral', ttl: '1h' } } : {};
-    return [{ type: 'text', text: MAP_SYSTEM }, { type: 'text', text: `<product_map>\n${m.text}\n</product_map>`, ...cache }];
+    return [{ type: 'text', text: MAP_SYSTEM }, { type: 'text', text: `<product_map>\n${m.text}\n</product_map>`, ...(m.complete ? CACHE_1H : {}) }];
   }
 
-  /** Writes the ready-made guides for the product's main tasks from the map. */
-  function buildLearn({ map, product = '' }) {
-    const messages = [{ role: 'user', content: `${product ? 'product: ' + capText(product, 80) + '\n' : ''}write guides for the 8 to 15 most common tasks a user of this product does (creating the main records, inviting people, changing settings, finding things). name each guide as the task in the user's words, for example "Выставить счёт клиенту". each guide starts on the first page of the map. also give a one-sentence summary of what the product is.` }];
-    return body('learn', mapSystem(map, {}), messages, LEARN_SCHEMA, { effort: 'medium', maxTokens: 32000 });
+  // ---------------- learning: guides written once from the map ----------------
+
+  const isFormView = v => !!v.form || v.kind !== 'page' || v.controls.some(c => /^(textbox|searchbox|textarea|combobox|select|spinbutton)$/.test(c.role) && !/search|поиск/i.test(c.name || ''));
+  // About one guide per form or dialog plus the main tasks of the screens: 8–15 for a small product, up to ~40.
+  function guideCount(views, lo, hi) {
+    const forms = views.filter(isFormView).length, pages = views.filter(v => v.kind === 'page').length;
+    return Math.max(lo, Math.min(hi, Math.round(forms + pages * 0.4)));
+  }
+
+  const LEARN_RULES = `every guide goes END TO END, so the user who picks it finishes the task:
+1. navigation from the first page of the map: GLOBAL links, then → links, to the screen of the task;
+2. the control that opens the form or dialog, when there is one;
+3. every field the task needs, one step each: action type for a text field, select for a list. value null, unless the guide's name itself says it (a guide named "Счёт с оплатой за 30 дней" selects "30 дней");
+4. when the task creates, sends or changes something, the last step is the control that finishes it: the one marked · commit, or the form's save, create or send button. a guide that stops before it is wrong.
+- a task that only looks at something ("Посмотреть счета"): navigation, then one look step whose element_ref is the table, list or region (role table, list, region) that shows it, or its heading. never a look step without a ref when such a control exists.
+- when the way goes through a control marked · not opened, or a button that should open a form or dialog but has no → and no fields for the task follow it in the map, the guide ends with a click on that control and continues_live is true: the rest is planned live on the user's screen. never invent steps or refs for what it opens.
+- when the task changes something but the map shows no control that finishes it, the guide ends with its last field and continues_live is true.
+- continues_live is false for every other guide.
+- refs only from the map. no two guides for the same task.
+- name each guide as the task in the user's words and in the interface language, for example "Выставить счёт клиенту", "Пригласить коллегу". the name says what the user wants, not which button they press.
+- a task on one record (change a load, pay an invoice, edit a driver) goes through its · one per row control, and the step says to pick the record the user needs. neither the name nor any step names a record the study saw.`;
+
+  function learnPrompt({ product, count, part = '', existing = [] }) {
+    const ex = (existing || []).filter(s => typeof s === 'string' && s.trim()).slice(0, 120).map(s => capText(s.replace(/[<>]/g, ' '), 90));
+    return [
+      product ? `product: ${capText(product, 80)}` : '',
+      `write ready-made guides for the tasks users do in this product: creating and changing the main records, inviting people, changing settings, finding and viewing things.`,
+      `how many: about one guide per form or dialog plus the main tasks of each screen; here about ${count}.`,
+      part,
+      LEARN_RULES,
+      ex.length ? `these guides already exist; do not write them again (or under another name):\n${ex.map(s => '- ' + s).join('\n')}` : '',
+      `also give a one-sentence summary of what the product is.`,
+    ].filter(Boolean).join('\n\n');
+  }
+
+  /**
+   * One request that writes the guides from the whole map. For a map that fits MAP_BUDGET this is the
+   * only request needed (and it writes the same cached prefix the questions read). For a bigger map use
+   * buildLearnBatches: this body would only carry the views that fit.
+   */
+  function buildLearn({ map, product = '', existing = [] }) {
+    const content = learnPrompt({ product, count: guideCount(map.views, 8, 40), existing });
+    return body('learn', mapSystem(map, {}), [{ role: 'user', content }], LEARN_SCHEMA, { effort: 'medium', maxTokens: 32000 });
+  }
+
+  // The route a page key belongs to, as segments: "/#/loads/:id/edit" → ["loads", "edit"].
+  function routeSegs(key) {
+    const k = String(key || '');
+    const i = k.indexOf('#');
+    const route = i >= 0 && /^#[!/]/.test(k.slice(i)) ? k.slice(i + 2) : k.slice(0, i >= 0 ? i : undefined);
+    return route.split(/[/?&=]+/).filter(s => s && s !== ':id' && !/^(page|view|tab|section|module|route|p|screen)$/i.test(s));
+  }
+
+  /**
+   * How a big map is split for learning: groups of related views that each fit the budget next to the
+   * shared head (GLOBAL navigation + a one-line index of every screen). Related = the same top-level
+   * section of the address; dialogs and panels always go with the page they open from.
+   * Deterministic: the same map gives the same groups, so batch i can be rebuilt later.
+   * Returns { single, head, groups: [{ ids, label }] }; single = the whole map fits one request.
+   */
+  function learnGroups(map, { budget = MAP_BUDGET } = {}) {
+    const views = map.views;
+    if (mapText(map, { budget }).complete) return { single: true, head: '', groups: [{ ids: views.map(v => v.id), label: 'all' }] };
+    const { isGlobal, head: gHead } = globalHead(map);
+    const byId = Object.fromEntries(views.map(v => [v.id, v]));
+    const pageOf = v => { for (let i = 0; v && v.kind !== 'page' && i < 20; i++) v = byId[v.parent]; return v && v.kind === 'page' ? v : null; };
+    // The index: every screen in one line, so each part knows the whole product (and where its views sit).
+    const index = full => views.map(v => full
+      ? `  ${v.id} ${v.kind} "${safe(v.title, 50)}" ${v.kind === 'page' ? safe(v.key, 60) : 'from ' + (v.opener || v.parent || '')}`
+      : `  ${v.id} "${safe(v.title, 32)}"`);
+    let head = [...gHead, 'SCREENS (the whole product; only the views below in VIEW blocks are described in full here)', ...index(true)].join('\n');
+    if (head.length > budget * 0.35) head = [...gHead, 'SCREENS (the whole product)', ...index(false)].join('\n');
+    if (head.length > budget * 0.35) head = gHead.join('\n');
+    const text = {};
+    const fromRow = rowOpened(map);
+    views.forEach(v => { text[v.id] = viewText(v, isGlobal, fromRow); });
+    // Atoms: a page with every dialog and panel that opens from it (never split unless it alone is too big).
+    const atoms = new Map(), order = [];
+    for (const v of views) {
+      const p = pageOf(v) || v;
+      if (!atoms.has(p.id)) { atoms.set(p.id, { page: p, ids: [] }); order.push(p.id); }
+      atoms.get(p.id).ids.push(v.id);
+    }
+    for (const a of atoms.values()) a.ids.sort((x, y) => (x === a.page.id ? -1 : y === a.page.id ? 1 : 0));
+    // Units: atoms of the same top-level section, in the order the explorer met them.
+    const units = new Map();
+    for (const id of order) {
+      const a = atoms.get(id), seg = routeSegs(a.page.key), sec = a.page.kind === 'page' ? seg[0] || '/' : '~' + id;
+      if (!units.has(sec)) units.set(sec, { sec, atoms: [] });
+      units.get(sec).atoms.push(a);
+    }
+    // Links from views outside a group into it, so the part can still navigate there (GLOBAL is in the head).
+    const incoming = {};
+    for (const w of views) for (const c of w.controls) {
+      if (!c.to || !byId[c.to] || (w.kind === 'page' && isGlobal(c))) continue;
+      (incoming[c.to] = incoming[c.to] || []).push({ from: w.id, line: lineOf(c) });
+    }
+    const stubs = ids => {
+      const own = new Set(ids), by = new Map();
+      for (const id of ids) for (const l of incoming[id] || []) {
+        if (own.has(l.from)) continue;
+        if (!by.has(l.from)) by.set(l.from, new Set());
+        by.get(l.from).add(l.line);
+      }
+      const out = [];
+      for (const [from, lines] of by) {
+        if (out.length > 60) break;
+        const w = byId[from];
+        out.push(`LINKS ON ${w.id} ${w.kind} "${safe(w.title, 60)}" (described in another part)`, ...[...lines].slice(0, 6));
+      }
+      return out.join('\n');
+    };
+    const size = ids => head.length + 1 + ids.reduce((n, id) => n + text[id].length + 1, 0) + stubs(ids).length + 32;
+    const groups = [];
+    let cur = [];
+    const flush = () => { if (cur.length) groups.push(cur); cur = []; };
+    const place = ids => {
+      if (size(cur.concat(ids)) <= budget) { cur = cur.concat(ids); return true; }
+      if (cur.length && size(ids) <= budget) { flush(); cur = ids.slice(); return true; }
+      return false;
+    };
+    for (const u of units.values()) {
+      const all = u.atoms.flatMap(a => a.ids);
+      if (place(all)) continue;
+      for (const a of u.atoms) {
+        if (place(a.ids)) continue;
+        // One page with more dialogs than fit: view by view.
+        for (const id of a.ids) if (!place([id])) { flush(); cur = [id]; }
+      }
+    }
+    flush();
+    const label = ids => {
+      const secs = [...new Set(ids.map(id => byId[id]).filter(v => v.kind === 'page').map(v => routeSegs(v.key)[0] || '/'))];
+      const titles = [...new Set(ids.map(id => byId[id]).filter(v => v.kind === 'page').map(v => safe(v.title, 30)))].slice(0, 6);
+      return `${secs.slice(0, 4).join(', ')}${secs.length > 4 ? '…' : ''}: ${titles.join(', ')}`;
+    };
+    return { single: false, head, groups: groups.map(ids => ({ ids, label: label(ids), stubs: stubs(ids) })) };
+  }
+
+  /**
+   * Request bodies that together write the guides for the whole map, however big.
+   * - a map that fits MAP_BUDGET: one body, exactly buildLearn's;
+   * - a bigger one: one body per group of related views (learnGroups), each under MAP_BUDGET, each with
+   *   GLOBAL navigation and the screen index in a cached system block shared by every part, the group's
+   *   views in full after it, and the guide names already written plus the areas of the other parts.
+   * existing: names of guides already written (saved ones, or earlier parts' when sending one by one:
+   * the grouping is deterministic, so rebuilding with a longer `existing` and taking body i is safe).
+   * Send them one after another or in parallel; merge with finishGuides + mergeGuides.
+   */
+  function buildLearnBatches({ map, product = '', existing = [], budget = MAP_BUDGET }) {
+    const plan = learnGroups(map, { budget });
+    if (plan.single) return [buildLearn({ map, product, existing })];
+    const byId = Object.fromEntries(map.views.map(v => [v.id, v]));
+    const { isGlobal } = globalHead(map);
+    const fromRow = rowOpened(map);
+    const n = plan.groups.length;
+    return plan.groups.map((g, i) => {
+      const views = g.ids.map(id => byId[id]);
+      const details = [...g.ids.map(id => viewText(byId[id], isGlobal, fromRow)), g.stubs].filter(Boolean).join('\n');
+      const system = [
+        { type: 'text', text: MAP_SYSTEM },
+        { type: 'text', text: `<product_map>\n${plan.head}\n`, ...CACHE_1H },
+        { type: 'text', text: `${details}\n</product_map>` },
+      ];
+      const others = plan.groups.filter((_, j) => j !== i).map(o => '- ' + o.label);
+      const part = `this product is large, so its guides are written in ${n} parts. this is part ${i + 1}: the views described in full (VIEW blocks). write guides only for tasks that end in this part (their last step is on one of these views); navigation to them may use GLOBAL, the LINKS lines and the → links. other parts, written separately, cover:\n${others.join('\n')}`;
+      const content = learnPrompt({ product, count: guideCount(views, 3, 20), part, existing });
+      return body('learn', system, [{ role: 'user', content }], LEARN_SCHEMA, { effort: 'medium', maxTokens: 32000 });
+    });
+  }
+
+  const MAX_GUIDE_STEPS = 25;
+  const nameKey = s => norm(s).replace(/[^\p{L}\p{N} ]/gu, ' ').replace(/\s+/g, ' ').trim();
+
+  // «Нажмите «X»» in the language of the guide: another click step's wording with its label swapped, else ru/en.
+  function clickText(steps, byRef, label) {
+    for (const s of steps) {
+      const c = s.element_ref && byRef[s.element_ref];
+      if (s.action !== 'click' || !c || !c.name || typeof s.instruction !== 'string') continue;
+      for (const [o, e] of [['«', '»'], ['"', '"'], ['“', '”']]) {
+        const q = o + c.name + e;
+        if (s.instruction.includes(q)) return capText(s.instruction.replace(q, o + label + e), 200);
+      }
+    }
+    const text = steps.map(s => s.instruction || '').join(' ');
+    return /[а-яё]/i.test(text) ? `Нажмите «${label}»` : `Click "${label}"`;
+  }
+
+  /**
+   * Model output → runnable guides [{ name, steps, live }].
+   * - steps whose element_ref is not in the map are dropped (null refs stay: the runner finds them by label);
+   * - a guide that fills fields in a view with exactly one · commit control, and does not end with a click
+   *   on a commit control, gets «Нажмите «<commit>»» appended;
+   * - live = continues_live, or the last step targets a control the explorer did not open, or the guide
+   *   ends on a field (type/select: nothing finishes it), or a non-look step has no target (the runner
+   *   then plans the rest live);
+   * - names deduplicated (normalized), at most 25 steps (a longer guide is cut and marked live);
+   * - a guide with no step pointing at a control is dropped.
+   * raw: the `guides` array of a learn reply, or the reply itself.
+   */
+  function finishGuides(raw, map) {
+    const list = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.guides) ? raw.guides : []);
+    const byRef = {}, viewOfRef = {};
+    map.views.forEach(v => v.controls.forEach(c => { byRef[c.ref] = c; viewOfRef[c.ref] = v; }));
+    const seen = new Set(), out = [];
+    for (const g of list) {
+      if (!g || typeof g.name !== 'string' || !g.name.trim() || !Array.isArray(g.steps)) continue;
+      const name = capText(g.name.trim(), 90), key = nameKey(name);
+      if (!key || seen.has(key)) continue;
+      let steps = g.steps.filter(s => s && typeof s.instruction === 'string' && ['click', 'type', 'select', 'look'].includes(s.action)
+        && (s.element_ref == null || s.element_ref === '' || byRef[s.element_ref]))
+        .map(s => ({ instruction: s.instruction, element_ref: s.element_ref || null, action: s.action, value: s.value == null ? null : s.value }));
+      // The form's finishing control, when the guide fills a form and stops short of it.
+      const fills = steps.filter(s => (s.action === 'type' || s.action === 'select') && s.element_ref);
+      if (fills.length) {
+        const v = viewOfRef[fills[fills.length - 1].element_ref];
+        const commits = v.controls.filter(c => c.commit);
+        const last = steps[steps.length - 1];
+        const endsCommit = last && last.action === 'click' && last.element_ref && byRef[last.element_ref].commit;
+        if (commits.length === 1 && !endsCommit) {
+          steps.push({ instruction: clickText(steps, byRef, commits[0].name), element_ref: commits[0].ref, action: 'click', value: null });
+        }
+      }
+      let cut = false;
+      if (steps.length > MAX_GUIDE_STEPS) { steps = steps.slice(0, MAX_GUIDE_STEPS); cut = true; }
+      const run = refSteps(steps, map, name);
+      if (!run.some(s => s.target)) continue;
+      const lastRef = steps.length && steps[steps.length - 1].element_ref;
+      const endsField = !!steps.length && /^(type|select)$/.test(steps[steps.length - 1].action);
+      const live = !!g.continues_live || cut || endsField || !!(lastRef && byRef[lastRef].unexplored) || run.some(s => s.action !== 'look' && !s.target);
+      seen.add(key);
+      out.push({ name, steps: run, live });
+    }
+    return out;
+  }
+
+  /**
+   * Merges two guide lists by normalized name, keeping the order of the old list. For the same name the
+   * new guide wins unless it is live and the old one is not (or is shorter while both are live alike);
+   * a replaced guide keeps the old one's id, created and runs, so saved references stay valid.
+   */
+  function mergeGuides(oldList, newList) {
+    const out = [], at = new Map();
+    for (const g of oldList || []) {
+      if (!g || !g.name) continue;
+      const k = nameKey(g.name);
+      if (at.has(k)) continue;
+      at.set(k, out.length);
+      out.push(g);
+    }
+    for (const g of newList || []) {
+      if (!g || !g.name) continue;
+      const k = nameKey(g.name);
+      if (!at.has(k)) { at.set(k, out.length); out.push(g); continue; }
+      const i = at.get(k), o = out[i];
+      const better = (!!o.live === !!g.live) ? (g.steps || []).length >= (o.steps || []).length : !g.live;
+      if (!better) continue;
+      const keep = {};
+      for (const f of ['id', 'created', 'runs']) if (o[f] !== undefined) keep[f] = o[f];
+      out[i] = { ...g, ...keep };
+    }
+    return out;
   }
 
   /** Answers a question from the map: steps across pages point at known controls, nothing is guessed. */
@@ -298,6 +612,7 @@ ${UNTRUSTED}`;
     return null;
   }
 
+  const rowTarget = c => (c.row && c.d && c.d.fp && c.d.fp.rowOf ? { row: true, rowLabel: c.rowLabel || c.d.fp.rowOf.label || '', rowOf: c.d.fp.rowOf } : {});
   /** Turns ref-based steps into runnable steps with element descriptors and checked values. */
   function refSteps(steps, map, question = '') {
     const byRef = {};
@@ -308,7 +623,10 @@ ${UNTRUSTED}`;
         instruction: capText(s.instruction, 200), action: s.action,
         value: safeValue(s.value, question, c && c.options),
         // A control whose descriptor could not be built still has its label and role to be found by.
-        target: c ? (c.d ? { ...c.d, text: c.d.text || c.name, role: c.d.role || c.role } : { sel: [], text: c.name, role: c.role || null }) : null,
+        // A row control: any row of its table will do (scan.js resolveRow / matchRow read rowOf); its text is the
+        // generic label, so nothing downstream looks for the sample record.
+        target: c ? (c.d ? { ...c.d, text: (c.row && c.rowLabel) || c.d.text || c.name, role: c.d.role || c.role, ...rowTarget(c) }
+          : { sel: [], text: (c.row && c.rowLabel) || c.name, role: c.role || null }) : null,
       };
     });
   }
@@ -349,7 +667,12 @@ ${UNTRUSTED}`;
     return b;
   }
 
-  function headers(apiKey, fromBrowser, withFallback) {
+  /**
+   * endpoint: a Scopos server proxy instead of the Anthropic API. With no key the request carries no
+   * credentials at all (the proxy adds its own); with a key the usual Anthropic headers are sent.
+   */
+  function headers(apiKey, fromBrowser, withFallback, endpoint) {
+    if (endpoint && !apiKey) return { 'content-type': 'application/json' };
     const h = { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': API_VERSION };
     if (withFallback) h['anthropic-beta'] = FALLBACK_BETA;
     // Calls from an extension or page carry an Origin; the API asks callers to opt in explicitly.
@@ -414,7 +737,9 @@ ${UNTRUSTED}`;
    * alive and never hit idle timeouts), retries overloads and rate limits twice with backoff
    * (honouring retry-after), and gives up after `timeoutMs`.
    */
-  async function call(requestBody, apiKey, { fromBrowser = true, signal, timeoutMs, onText, onUsage } = {}) {
+  async function call(requestBody, apiKey, { fromBrowser = true, signal, timeoutMs, onText, onUsage, endpoint } = {}) {
+    const url = endpoint || API_URL;
+    const hdrs = headers(apiKey, fromBrowser, !!requestBody.fallbacks, endpoint);
     const limit = timeoutMs || (requestBody.model === MODELS.learn ? 180000 : 60000);
     const timer = typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(limit) : null;
     const sig = signal && timer && AbortSignal.any ? AbortSignal.any([signal, timer]) : signal || timer || undefined;
@@ -422,7 +747,7 @@ ${UNTRUSTED}`;
     for (let attempt = 0; attempt < 3; attempt++) {
       let res;
       try {
-        res = await fetch(API_URL, { method: 'POST', headers: headers(apiKey, fromBrowser, !!requestBody.fallbacks), body: JSON.stringify(requestBody), signal: sig });
+        res = await fetch(url, { method: 'POST', headers: hdrs, body: JSON.stringify(requestBody), signal: sig });
       } catch (e) {
         if (signal && signal.aborted) throw e;
         if (timer && timer.aborted) throw new Error('Claude не ответил вовремя. Попробуйте ещё раз.');
@@ -439,6 +764,13 @@ ${UNTRUSTED}`;
         continue;
       }
       try {
+        // A proxy may answer with a plain (non-streamed) Messages response.
+        if (/application\/json/i.test((res.headers && res.headers.get && res.headers.get('content-type')) || '')) {
+          const data = await res.json();
+          if (data && data.error) throw new Error(apiMessage(500, JSON.stringify(data)));
+          if (onUsage && data.usage) onUsage(data.usage, requestBody.model);
+          return parse(data);
+        }
         const out = await readStream(res, onText);
         if (onUsage) onUsage(out.usage, requestBody.model);
         return parseText(out);
@@ -453,7 +785,9 @@ ${UNTRUSTED}`;
     throw lastError || new Error('Claude не ответил.');
   }
 
-  const Brain = { MODELS, buildAsk, buildLocate, buildLearn, buildAskMap, mapText, factOk, refSteps, safeValue, viewOf, pageKey, call, parse, headers, tokens, norm, API_URL, MAP_BUDGET };
+  const Brain = {
+    MODELS, buildAsk, buildLocate, buildContinue, askSteps, buildLearn, buildLearnBatches, learnGroups, finishGuides, mergeGuides, buildAskMap, mapText, factOk, refSteps, safeValue, viewOf, pageKey, call, parse, headers, tokens, norm, API_URL, MAP_BUDGET, MAP_SYSTEM,
+  };
   if (typeof module === 'object' && module.exports) module.exports = Brain;
   root.ScoposBrain = Brain;
 })(typeof globalThis !== 'undefined' ? globalThis : this);

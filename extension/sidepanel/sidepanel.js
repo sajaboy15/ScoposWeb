@@ -17,6 +17,8 @@
   let progress = null;   // { runId, chars, steps, answer } while Claude streams the answer
   let loadSeq = 0;
   let recEdits = {};     // edited instructions while recording
+  let access = null;     // { ok, code, message, origin } for the tab in front
+  let pendingRetry = null; // what to do again once the user grants access to the site
 
   // ---------- active tab: the panel always shows the session of the tab in front ----------
   async function loadTab() {
@@ -30,10 +32,11 @@
     tab = { id: t.id, url: t.url, origin, host };
     $('#site').textContent = host;
     $('#site').title = t.url || '';
-    if (switched) { saving = false; progress = null; }
-    const res = await bg({ type: 'session', tabId: t.id });
+    if (switched) { saving = false; progress = null; pendingRetry = null; }
+    const [res, acc] = await Promise.all([bg({ type: 'session', tabId: t.id }), bg({ type: 'access', tabId: t.id })]);
     if (seq !== loadSeq) return;
     session = res.session || null;
+    access = acc && !acc.error ? acc : null;
     await loadPlaybooks();
     await loadLearn();
     if (seq !== loadSeq) return;
@@ -64,7 +67,7 @@
     } else if (L.status === 'done' || L.status === 'mapped') {
       const when = L.at ? new Date(L.at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : '';
       box.innerHTML = `<h3>Продукт изучен${when ? ' · ' + when : ''}</h3><div class="stat"><div><b>${L.views || 0}</b><span>экранов и окон</span></div><div><b>${L.guides || 0}</b><span>готовых гайдов</span></div></div>
-        ${L.summary ? `<p>${esc(L.summary)}</p>` : ''}${L.error ? `<p>${esc(L.error)}</p>` : ''}${L.dropped ? `<p class="faint small">${L.dropped} ${L.dropped === 1 ? 'гайд отброшен' : 'гайдов отброшено'}: в них были кнопки, которых нет на карте.</p>` : ''}
+        ${L.summary ? `<p>${esc(L.summary)}</p>` : ''}${L.error ? `<p>${esc(L.error)}</p>` : ''}${L.autoAt ? `<p class="faint small">${L.autoAdded ? `Сам дописал ${ruCount(L.autoAdded, 'гайд', 'гайда', 'гайдов')} по новым экранам` : 'Просмотрел новые экраны'} · ${new Date(L.autoAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}</p>` : ''}${L.dropped ? `<p class="faint small">${L.dropped} ${L.dropped === 1 ? 'гайд отброшен' : 'гайдов отброшено'}: в них были кнопки, которых нет на карте.</p>` : ''}
         <div class="row"><button class="btn ghost" data-learn="restart">Изучить заново</button><button class="btn ghost" data-learn="forget">Забыть</button></div>`;
     } else if (L.status === 'stopped' || (L.status === 'error' && hasMap)) {
       box.innerHTML = `<h3>${L.status === 'stopped' ? 'Изучение остановлено' : 'Не получилось дописать гайды'}</h3>
@@ -77,19 +80,28 @@
         <p class="faint small" style="margin:10px 0 0">Нажимаю только то, что открывает экраны и окна. Ничего не заполняю, не сохраняю и не отправляю: пока я хожу по сайту, отправка форм и запросов на запись заблокирована. Лучше запускать под тестовым аккаунтом.</p>`;
     }
   }
-  const learnText = () => (learnChars ? `Claude пишет гайды · ${learnChars.toLocaleString('ru-RU')} символов` : 'Claude читает карту продукта');
-  $('#learn-box').addEventListener('click', async e => {
+  const learnText = () => {
+    const part = learn && learn.batches > 1 ? ` · часть ${learn.batch || 1} из ${learn.batches}` : '';
+    return learnChars ? `Claude пишет гайды${part} · ${learnChars.toLocaleString('ru-RU')} символов` : `Claude читает карту продукта${part}`;
+  };
+  $('#learn-box').addEventListener('click', e => {
     const b = e.target.closest('[data-learn]');
-    if (!b || !tab) return;
-    const act = b.dataset.learn;
+    if (b && tab) learnAct(b.dataset.learn);
+  });
+  async function learnAct(act) {
+    if (!tab) return;
     let r = {};
-    if (act === 'start' || act === 'restart') { learnChars = 0; r = await bg({ type: 'learn:start', tabId: tab.id, restart: act === 'restart' }); }
+    if (act === 'start' || act === 'restart') {
+      learnChars = 0;
+      r = await bg({ type: 'learn:start', tabId: tab.id, restart: act === 'restart' });
+      if (r.code === 'access') { needAccess(r, () => learnAct(act)); return; }
+    }
     if (act === 'stop') r = await bg({ type: 'learn:stop', tabId: tab.id, origin: tab.origin });
     if (act === 'finish') { r = await bg({ type: 'learn:finish', tabId: tab.id, origin: tab.origin }); if (!r.error) flash('Останавливаюсь и передаю карту Claude'); }
     if (act === 'forget') { r = await bg({ type: 'learn:forget', origin: tab.origin }); if (!r.error) flash('Карта и гайды этого сайта забыты'); }
     if (r && r.error) flash(r.error);
     await loadLearn(); await loadPlaybooks(); renderLearn(); renderPlaybooks();
-  });
+  }
 
   async function loadPlaybooks() {
     playbooks = tab && tab.origin ? (await bg({ type: 'playbooks', origin: tab.origin })).list || [] : [];
@@ -98,6 +110,8 @@
   chrome.tabs.onActivated.addListener(() => loadTab());
   chrome.tabs.onUpdated.addListener((id, info) => { if (tab && id === tab.id && (info.status === 'complete' || info.url)) loadTab(); });
   chrome.windows && chrome.windows.onFocusChanged && chrome.windows.onFocusChanged.addListener(() => loadTab());
+  // Back from chrome://extensions (site access changed there): look at the tab again.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) loadTab(); });
   chrome.runtime.onMessage.addListener(msg => {
     if (!tab) return;
     if (msg.type === 'session' && msg.tabId === tab.id) {
@@ -111,6 +125,7 @@
     if (msg.type === 'record:stop-request' && msg.tabId === tab.id) stopRecording();
     if (msg.type === 'learn' && msg.origin === tab.origin) {
       learn = msg.learn;
+      if (learn && learn.status === 'writing') { const el = $('#learn-now'); if (el) el.textContent = learnText(); }
       if (learn && learn.status === 'done') loadPlaybooks().then(() => { renderPlaybooks(); render(); });
       if (view === 'pb') renderLearn();
     }
@@ -133,7 +148,8 @@
     $('#view-set').hidden = v !== 'set';
     $('#composer').hidden = v !== 'ask';
     if (v === 'pb') renderPlaybooks();
-    if (v === 'set') { renderKey(); renderUsage(); }
+    if (v === 'set') { renderKey(); renderUsage(); renderLimits(); }
+    renderAccess();
   }
   document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) setView(b.dataset.view); });
 
@@ -159,14 +175,55 @@
     const res = await bg({ type: 'ask', tabId, question: text, force });
     // The user switched tabs, asked again or pressed Stop meanwhile: that state is already on screen.
     if (!tab || tab.id !== tabId || res.stale || res.aborted) return;
-    if (res.error) session = { question: text, status: 'error', error: res.error, steps: [], tabId };
-    else if (res.session) session = res.session;
+    if (res.error) {
+      session = { question: text, status: 'error', error: res.error, errorCode: res.code || null, errorOrigin: res.origin || null, steps: [], tabId };
+      if (res.code === 'access') pendingRetry = () => askQuestion(text, force);
+    } else if (res.session) session = res.session;
     render();
   }
+
+  // ---------- site access: Chrome's "on click" / "specific sites" settings, restricted pages ----------
+  function needAccess(r, retry) {
+    access = { ok: false, code: 'access', message: r.error || r.message, origin: r.origin || (tab && tab.origin) };
+    pendingRetry = retry || null;
+    renderAccess();
+  }
+  function renderAccess() {
+    const box = $('#access');
+    if (!box) return;
+    const shownInFeed = view === 'ask' && session && session.status === 'error' && session.errorCode === 'access';
+    const A = access && access.ok === false && ['access', 'restricted', 'file'].includes(access.code) ? access : null;
+    if (!A || shownInFeed) { box.hidden = true; box.innerHTML = ''; return; }
+    box.hidden = false;
+    box.classList.toggle('quiet', A.code !== 'access');
+    box.innerHTML = A.code === 'access'
+      ? `<b>Нет доступа к этому сайту</b><p>Chrome не даёт Scopos читать ${esc((tab && tab.host) || 'эту страницу')}: в настройках расширения доступ к сайтам стоит «по клику» или «на выбранных сайтах».</p>
+        <div class="row"><button class="btn main" data-grant="${esc(A.origin || '')}">Разрешить доступ</button></div>`
+      : `<b>${A.code === 'file' ? 'Нужен доступ к файлам' : 'Здесь Scopos не работает'}</b><p>${esc(A.message || '')}</p>`;
+  }
+  // chrome.permissions.request needs the click itself (a user gesture): it is the first thing the handler does.
+  document.addEventListener('click', e => {
+    const b = e.target.closest('[data-grant]');
+    if (!b) return;
+    const origin = b.dataset.grant || (tab && tab.origin);
+    if (!origin) return;
+    let asked;
+    try { asked = chrome.permissions.request({ origins: [origin + '/*'] }); } catch (err) { flash('Chrome не дал запросить доступ'); return; }
+    Promise.resolve(asked).then(async ok => {
+      if (!ok) { flash('Доступ не выдан'); return; }
+      flash('Доступ разрешён');
+      access = null;
+      const retry = pendingRetry; pendingRetry = null;
+      if (session && session.errorCode === 'access') session = null;
+      await loadTab();
+      if (retry) retry();
+    }, () => flash('Chrome не дал запросить доступ'));
+  });
 
   const secs = ms => (ms / 1000).toFixed(1).replace('.', ',') + ' с';
   function render() {
     if (view === 'pb') renderPlaybooks();
+    renderAccess();
     const feed = $('#feed');
     const busy = !!(session && session.status === 'thinking');
     $('#composer').classList.toggle('busy', busy);
@@ -179,8 +236,15 @@
       thinkTimer = setInterval(updateThinking, 400);
       return;
     }
+    if (session.status === 'error' && session.errorCode === 'access') {
+      const origin = session.errorOrigin || (tab && tab.origin) || '';
+      if (!pendingRetry && session.question) { const qq = session.question; pendingRetry = () => askQuestion(qq); }
+      feed.innerHTML = `${session.question ? `<div class="q">${esc(session.question)}</div>` : ''}<div class="error"><b>Нет доступа к этому сайту</b><br>${esc(session.error || '')}
+        <div class="row"><button class="btn main" data-grant="${esc(origin)}">Разрешить доступ</button><button class="btn ghost" data-act="new">Новый вопрос</button></div></div>`;
+      return;
+    }
     if (session.status === 'error') {
-      const needKey = /ключ/i.test(session.error || '');
+      const needKey = session.errorCode === 'key' || session.errorCode === 'budget' || (!session.errorCode && /ключ/i.test(session.error || ''));
       feed.innerHTML = `${session.question ? `<div class="q">${esc(session.question)}</div>` : ''}<div class="error">${esc(session.error || 'Что-то пошло не так.')}
         <div class="row">${needKey ? '<button class="btn main" data-act="open-settings">Открыть настройки</button>' : ''}${session.question ? `<button class="btn ${needKey ? 'ghost' : 'main'}" data-act="retry">Спросить ещё раз</button>` : ''}<button class="btn ghost" data-act="new">Новый вопрос</button></div></div>`;
       return;
@@ -296,7 +360,10 @@
     setView('ask');
     const res = await bg({ type: 'playbook:run', tabId, origin: tab.origin, id });
     if (!tab || tab.id !== tabId || res.stale) return;
-    if (res.error) { flash(res.error); session = { question: '', status: 'error', error: res.error, steps: [], tabId }; }
+    if (res.error) {
+      if (res.code !== 'access') flash(res.error); else pendingRetry = () => runPlaybook(id);
+      session = { question: '', status: 'error', error: res.error, errorCode: res.code || null, errorOrigin: res.origin || null, steps: [], tabId };
+    }
     else session = res.session || session;
     render();
   }
@@ -372,7 +439,13 @@
     try { apiKey = (await chrome.storage.local.get('apiKey')).apiKey || ''; } catch (e) { apiKey = ''; }
     $('#key').value = '';
     $('#key').placeholder = apiKey ? '••••••••' + apiKey.slice(-4) : 'sk-ant-…';
-    $('#key-state').innerHTML = apiKey ? '<span class="pill ok">Подключено</span><button class="btn ghost" id="key-del">Удалить ключ</button>' : '<span class="pill need">Нужен ключ</span>';
+    if (apiKey) { $('#key-state').innerHTML = '<span class="pill ok">Ключ: свой ключ</span><button class="btn ghost" id="key-del">Удалить ключ</button>'; return; }
+    $('#key-state').innerHTML = '<span class="faint">Проверяю локальный сервер…</span>';
+    const k = await bg({ type: 'key:state', fresh: true });
+    if (apiKey !== ((await chrome.storage.local.get('apiKey').catch(() => ({}))).apiKey || '')) return; // changed meanwhile
+    $('#key-state').innerHTML = k.mode === 'proxy'
+      ? `<span class="pill ok">Ключ: из локального сервера Scopos</span><span class="faint small">${esc(String(k.devServer || '').replace(/^https?:\/\//, ''))}</span>`
+      : '<span class="pill need">Нужен ключ</span>';
   }
   $('#key-save').addEventListener('click', async () => {
     const v = $('#key').value.trim();
@@ -383,13 +456,40 @@
   $('#key').addEventListener('keydown', e => { if (e.key === 'Enter') $('#key-save').click(); });
   $('#key-state').addEventListener('click', async e => { if (e.target.id === 'key-del') { await chrome.storage.local.remove('apiKey').catch(() => {}); renderKey(); } });
 
-  const money = c => '$' + (c > 0 && c < 0.01 ? c.toFixed(4) : c.toFixed(2)).replace('.', ',');
+  const money = c => '$' + (c > 0 && c < 0.01 ? c.toFixed(4) : c.toFixed(2));
+  const dollars = n => '$' + (Number.isInteger(n) ? String(n) : n.toFixed(2));
   const usageLine = u => `≈ ${Math.round(u.tokens || 0).toLocaleString('ru-RU')} токенов, ~${money(u.cost || 0)} · ${ruCount(u.calls || 0, 'запрос', 'запроса', 'запросов')}`;
+
+  // ---------- monthly limit and auto-guides (chrome.storage.local: monthlyLimit, autoGuides) ----------
+  async function renderLimits() {
+    let s = {};
+    try { s = await chrome.storage.local.get(['monthlyLimit', 'autoGuides']); } catch (e) { s = {}; }
+    const lim = Number.isFinite(+s.monthlyLimit) && s.monthlyLimit !== '' && s.monthlyLimit != null && +s.monthlyLimit >= 0 ? +s.monthlyLimit : 2;
+    if (document.activeElement !== $('#limit')) $('#limit').value = String(lim);
+    $('#auto-guides').checked = s.autoGuides !== false;
+  }
+  $('#limit').addEventListener('change', async () => {
+    const n = parseFloat(String($('#limit').value).replace(',', '.'));
+    if (!Number.isFinite(n) || n < 0) { flash('Лимит: число от 0'); return renderLimits(); }
+    const v = Math.round(n * 100) / 100;
+    try { await chrome.storage.local.set({ monthlyLimit: v }); flash(`Лимит: ${dollars(v)} в месяц`); } catch (e) { flash('Не получилось сохранить лимит'); }
+    renderLimits(); renderUsage();
+  });
+  $('#auto-guides').addEventListener('change', async e => {
+    try { await chrome.storage.local.set({ autoGuides: !!e.target.checked }); } catch (x) { /* ignore */ }
+    flash(e.target.checked ? 'Новые экраны превратятся в гайды сами' : 'Гайды дописываются только по кнопке');
+  });
+
   async function renderUsage() {
     const box = $('#usage');
     if (!box) return;
     const r = await bg({ type: 'usage', origin: tab ? tab.origin : '' });
     const site = r.site, total = r.total || { tokens: 0, cost: 0, calls: 0 };
+    if (r.month) {
+      const m = $('#month');
+      m.textContent = `В этом месяце: ${money(r.month.cost || 0).replace(/^\$0\.00$/, '$0')} из ${dollars(r.month.limit)}`;
+      m.classList.toggle('over', (r.month.cost || 0) >= r.month.limit);
+    }
     box.innerHTML = `${tab && tab.host ? `<p class="muted"><b>${esc(tab.host)}</b>: ${site ? usageLine(site) : 'пока ни одного запроса к Claude'}${site && site.cacheHits ? ` · ${ruCount(site.cacheHits, 'ответ', 'ответа', 'ответов')} из кэша бесплатно` : ''}</p>` : ''}
       <p class="muted">Всего: ${usageLine(total)}</p>
       <p class="faint small">Оценка по ценам Anthropic, точная сумма в console.anthropic.com. Готовые сценарии и ответы из кэша токенов не тратят.</p>
@@ -407,6 +507,7 @@
     clearTimeout(flash.t); flash.t = setTimeout(() => t.classList.remove('on'), 2400);
   }
 
+  try { $('#ver').textContent = 'Scopos ' + chrome.runtime.getManifest().version; } catch (e) { /* keep the static text */ }
   setView('ask');
   loadTab();
   q.focus();

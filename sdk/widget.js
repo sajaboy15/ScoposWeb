@@ -326,7 +326,7 @@ input:focus-visible { outline: none; }
   root.addEventListener('click', e => {
     const b = e.target.closest('[data-do],[data-pb]');
     if (!b) return;
-    if (b.dataset.pb) { learning = null; const pb = playbooks.find(p => p.id === b.dataset.pb); if (pb) { stopAsk(); runSteps(newRun(), pb.name, `Сценарий «${pb.name}»`, pb.steps, 'playbook'); } return; }
+    if (b.dataset.pb) { learning = null; const pb = playbooks.find(p => p.id === b.dataset.pb); if (pb) { stopAsk(); runSteps(newRun(), pb.name, `Сценарий «${pb.name}»`, pb.steps, 'playbook', !!pb.live); } return; }
     const act = b.dataset.do;
     if (act === 'toggle') setOpen(!w.classList.contains('open'));
     if (act === 'close') setOpen(false);
@@ -376,7 +376,7 @@ input:focus-visible { outline: none; }
     const runId = newRun();
     if (!force) {
       const m = matchGuides(question);
-      if (m.run) return runSteps(runId, question, `Сценарий «${m.run.name}»`, m.run.steps, 'playbook');
+      if (m.run) return runSteps(runId, question, `Сценарий «${m.run.name}»`, m.run.steps, 'playbook', !!m.run.live);
       if (m.suggest.length) {
         state = { runId, question, status: 'suggest', steps: [], suggestions: m.suggest.map(p => ({ id: p.id, name: p.name })) };
         save(); render(); setOpen(true); return;
@@ -440,9 +440,11 @@ input:focus-visible { outline: none; }
   const here = () => location.pathname + (location.hash && location.hash !== '#' && location.hash !== '#/' ? location.hash : '');
   const samePage = path => !path || (S.pathKey ? S.pathKey(path) === S.pathKey(location.pathname + location.search + location.hash) : String(path).replace(/#\/?$/, '') === here());
 
-  function runSteps(runId, question, answer, steps, source) {
+  // live: the guide stops where the learned map stopped (a form the explorer did not open); at its end the
+  // rest is planned once from the page the user is on.
+  function runSteps(runId, question, answer, steps, source, live = false) {
     progress = null;
-    state = { runId, question, answer, steps, source, index: 0, status: steps.length ? 'running' : 'answered', replanned: [], heals: 0 };
+    state = { runId, question, answer, steps, source, live: !!live, index: 0, status: steps.length ? 'running' : 'answered', replanned: [], heals: 0, mores: 0 };
     save(); render();
     // Step aside so the page is visible; the pointer card carries the walkthrough from here.
     if (steps.length) { start(0); setTimeout(() => setOpen(false), 450); } else setOpen(true);
@@ -453,7 +455,20 @@ input:focus-visible { outline: none; }
     const mine = () => state && state.runId === runId;
     S.guide.start(state.steps, {
       index,
-      onChange: ({ index: i }) => { if (!mine()) return; state.index = Math.min(i, state.steps.length); if (i >= state.steps.length) state.status = 'done'; save(); render(); },
+      onChange: ({ index: i }) => { if (!mine()) return; state.index = Math.min(i, state.steps.length); if (i >= state.steps.length && !state.live) state.status = 'done'; save(); render(); },
+      live: !!state.live,
+      // The end of a live guide, or a step that is not on the page: one small request plans the rest from here.
+      more: async ({ index: i, done }) => {
+        if (!mine() || (state.mores || 0) >= 2) return null;
+        state.mores = (state.mores || 0) + 1; save();
+        const ctl = new AbortController();
+        const clear = deadline(ctl, 60000);
+        try {
+          const out = await post('', { question: state.question, page: scan(state.question), progress: (done || state.steps.slice(0, i).map(s => s.instruction)).slice(0, 20), product: cfg.product }, { signal: ctl.signal });
+          return mine() ? toSteps(out.steps || []) : null;
+        } catch (e) { return null; } finally { clear(); }
+      },
+      onSteps: list => { if (!mine() || !Array.isArray(list)) return; state.steps = list; save(); render(); },
       onEnd: reason => { if (!mine()) return; state.status = reason === 'done' ? 'done' : 'answered'; if (reason === 'done') state.index = state.steps.length; save(); render(); },
       missingDelay: state.source === 'claude' ? 1200 : 2500,
       onMissing: async (step, i) => {
@@ -496,7 +511,7 @@ input:focus-visible { outline: none; }
       if (cfg.learn) return confirmLearning();
       console.warn('[Scopos] режим изучения выключен: добавьте data-learn к тегу <script> (работает на localhost или с data-learn-token).');
     }
-    if (state && state.status === 'running' && state.index < state.steps.length) start(state.index);
+    if (state && state.status === 'running' && (state.index < state.steps.length || state.live)) start(state.index);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 

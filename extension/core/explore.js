@@ -35,6 +35,41 @@
  *    behind a dialog it can't close.
  * Use a test account all the same, like you would for a new hire.
  *
+ * Form openers («Добавить клиента», «Пригласить коллегу», «Сменить тариф», New load, Invite user, Edit, +, ⋯):
+ *  - pressed ONLY when writes are blocked below the page: opts.netBlocked === true in the extension (the worker
+ *    confirmed its declarativeNetRequest block for the tab), or, in SDK mode (no chrome.runtime.id, or
+ *    opts.sdk === true), when S.guard.on() resolved true and opts.forms !== false. opts.forms === false turns
+ *    them off everywhere. Without that they are only marked `unexplored` in the map;
+ *  - the opener verb must START the label, and it is the only thing excused: the rest of the element's text,
+ *    attributes and handlers still go through the full veto ("Send invite", "Пригласить и отправить" are refused);
+ *  - context decides commit vs opener: inside a dialog, or next to editable fields (its form, fieldset or a
+ *    box up to 3 levels up that holds fields), or type=submit in a form, it is a commit and never pressed;
+ *    only page-level buttons are openers. A press that the guard (or opts.netBlocks()) saw write is marked
+ *    commit and that control (role + name + section) is never pressed again anywhere;
+ *  - one press per same-named control per view (row "Edit" ×50 → one), one per global header control per walk;
+ *    pagination and "load more" are never pressed, sort and filter controls at most once per view;
+ *  - a Navigation API fence cancels navigations to other origins, downloads and addresses that act.
+ *
+ * Map format (toMap(state) and snapshot()):
+ *   { origin, learnedAt, status, probes, views: [View] }
+ *   View    = { id: 'V3', key: '/invoices', url, kind: 'page'|'dialog'|'panel', parent?: 'V1', opener?: 'V1.4',
+ *               title, headings: [..], facts?: [..], form?: true, controls: [Control] }
+ *             form: true when the view has an editable field (textbox, select, combobox …) and a commit control.
+ *   Control = { ref: 'V3.4', role, name, section, state, options?: [..], d: descriptor (with d.view = page title),
+ *               to?: 'V7' (the view it opens), commit?: true, unexplored?: true }
+ *             commit: it finishes a form or dialog (submit button, primary dialog-footer button, a save /
+ *               create / send / apply / confirm-like button next to fields) or a press of it was seen writing;
+ *             unexplored: it looks like it opens a form or dialog but was not opened (danger veto, limits, no
+ *               network block): a guide must continue live from there;
+ *             region controls (role 'table' | 'list' | 'region', ≤ 4 per view, named by caption, aria-label or
+ *               the nearest heading) come after the other controls, so "look at the list" steps can point.
+ *
+ * S.explore.snapshot(): the current screen as ONE View in the format above, synchronous, presses nothing and
+ * keeps no state. id 'P', refs 'P.1' …, kind 'dialog' when a dialog is open (then key '<page key> › <title>'),
+ * else 'page'; no `to` (it knows no other views), openers are `unexplored`. Measured in headless Chrome:
+ * 75–105 ms on the TMS dashboard (53 controls), 95–175 ms on a 308-control page, 250 ms on Tabler's dashboard,
+ * mostly scan.js (inventory + descriptors); 45–60 ms when the scan cache of the same task is warm. Call it idle.
+ *
  * The walk is a small state machine saved through opts.store, so a full page
  * load in the middle of it resumes on the next page. Stop is saved too.
  */
@@ -42,7 +77,9 @@
   const S = (root.Scopos = root.Scopos || {});
   if (S.explore) return; // loaded twice: one walker per document
 
-  const LIMITS = { views: 40, extra: 60, probes: 160, perView: 30, controls: 150, ms: 5 * 60 * 1000, step: 8000, bytes: 1.5e6 };
+  // bytes: UTF-8 size of the saved walk state. It goes to chrome.storage.session (10 MB for the whole extension,
+  // shared with the guide sessions) or the SDK's sessionStorage (~5 M characters), once per press.
+  const LIMITS = { views: 150, extra: 250, probes: 700, perView: 30, controls: 150, regions: 4, ms: 15 * 60 * 1000, step: 8000, bytes: 4e6 };
 
   // ---------------- what is risky ----------------
   const B = '(?<![\\p{L}\\p{N}])'; // start of a word (\b does not work for Cyrillic)
@@ -290,8 +327,11 @@
     'nav', 'navigation', 'go', 'to', 'view', 'page', 'route', 'router', 'push', 'navigate', 'href', 'location', 'new', 'create',
     'handle', 'on', 'button', 'btn', 'icon', 'closer',
   ]);
-  /** 'write' | 'danger' | null for one attribute. */
-  function fwAttr(name, value) {
+  /**
+   * 'write' | 'danger' | null for one attribute. form: for a form opener, its opener words («invite» in
+   * @click="openInviteModal()") are UI words too; writes (hx-post …) and every other verb still count.
+   */
+  function fwAttr(name, value, form) {
     if (FW_WRITE.test(name)) return 'write';
     if (/^data-(?:turbo-)?method$/i.test(name)) return /^\s*get\s*$/i.test(value || 'get') ? null : 'write';
     if (!FW_CLICK.test(name) || !value) return null;
@@ -300,19 +340,20 @@
     // Addresses inside handler code (location.href = '/items/5/archive') are checked like links.
     const URLS = /https?:\/\/[^\s'"`)]+|\/[\w./?=&%:-]+/g;
     for (const m of v.match(URLS) || []) if (m.length > 1 && isDangerAddress(m)) return 'danger';
-    const code = v.replace(URLS, ' ');
+    let code = v.replace(URLS, ' ');
+    if (form) code = maskForm(code);
     const toks = dnorm(code).split(' ').filter(Boolean);
     if (!toks.length || toks.every(t => UI_SAFE.has(t) || /^\d+$/.test(t))) return null;
     if (isDangerText(code)) return 'danger';
     return actionPart(code, UI_SAFE) ? 'danger' : null;
   }
   /** The element (or an ancestor whose click handler it would trigger) writes or names an action. */
-  function fwCheck(el) {
+  function fwCheck(el, form) {
     let hit = null;
     for (let n = el, depth = 0; n && n.nodeType === 1 && depth < 25; n = n.parentElement, depth++) {
       const attrs = n.attributes || [];
       for (let i = 0; i < attrs.length; i++) {
-        const r = fwAttr(attrs[i].name, attrs[i].value);
+        const r = fwAttr(attrs[i].name, attrs[i].value, form);
         if (r === 'write') return 'write';
         if (r === 'danger') hit = 'danger';
       }
@@ -331,6 +372,222 @@
   const CHROME = 'nav,header,aside,[role=navigation],[role=banner],[role=menubar],[role=complementary]';
   const ROWS = 'table,tbody,[role=grid],[role=table],[role=row],[role=rowgroup],[role=list],[role=listitem],ul,ol';
   const ROUTE_Q = /^(page|view|tab|section|module|route|p|screen)$/i;
+  const DIALOG = 'dialog,[role=dialog],[role=alertdialog],[aria-modal=true]';
+
+  // ---------------- form openers and commits ----------------
+  // Verbs that open a form, a dialog or a record when they START a label. Whole words, folded like dnorm().
+  // FORM_NAV: the ones that only show something; they never finish a form.
+  const FORM_NAV = [
+    'открыть', 'откройте', 'просмотр', 'просмотреть', 'посмотреть', 'подробнее', 'подробности', 'еще', 'действия',
+    'open', 'view', 'details', 'detail', 'more', 'actions', 'see',
+    'offnen', 'öffnen', 'anzeigen', 'details', 'mehr', 'abrir', 'ver', 'detalles', 'más', 'detalhes', 'mais', 'ouvrir', 'voir',
+    'détails', 'apri', 'vedi', 'visualizza', 'dettagli', 'altro', 'aç', 'görüntüle', 'goruntule', 'detaylar', 'ayrıntılar',
+    'otwórz', 'otworz', 'zobacz', 'pokaż', 'pokaz', 'szczegóły', 'szczegoly', 'więcej', 'wiecej', 'ochish', 'korish', 'batafsil',
+    'ашу', 'көру', 'толығырақ',
+  ];
+  const FORM_MAKE = [
+    // RU
+    'создать', 'создайте', 'добавить', 'добавьте', 'новый', 'новая', 'новое', 'новые', 'нового', 'новую', 'пригласить', 'пригласите',
+    'изменить', 'измените', 'редактировать', 'отредактировать', 'сменить', 'смените', 'переименовать', 'настроить', 'настройте',
+    'подключить', 'подключите', 'назначить', 'назначьте', 'управлять',
+    // EN
+    'new', 'create', 'add', 'invite', 'edit', 'change', 'rename', 'configure', 'setup', 'connect', 'assign', 'dispatch', 'manage',
+    'compose', 'customize', 'modify',
+    // verbs that open a dialog to record something ("Upload document", "Log fuel purchase", "Schedule service"):
+    // openers only with an object after them (DIALOG_VERB); the bare verb inside a dialog or form is its commit
+    'upload', 'log', 'schedule',
+    // DE ES PT FR IT
+    'neu', 'neue', 'neuer', 'neues', 'neuen', 'erstellen', 'hinzufügen', 'hinzufugen', 'einladen', 'bearbeiten', 'ändern', 'andern',
+    'umbenennen', 'konfigurieren', 'einrichten', 'verbinden', 'zuweisen', 'verwalten',
+    'nuevo', 'nueva', 'crear', 'añadir', 'anadir', 'agregar', 'invitar', 'editar', 'cambiar', 'renombrar', 'configurar', 'conectar',
+    'asignar', 'gestionar', 'novo', 'nova', 'criar', 'adicionar', 'convidar', 'alterar', 'mudar', 'renomear', 'atribuir', 'gerenciar',
+    'nouveau', 'nouvelle', 'créer', 'creer', 'ajouter', 'inviter', 'modifier', 'changer', 'renommer', 'configurer', 'connecter',
+    'assigner', 'attribuer', 'gérer', 'gerer', 'nuovo', 'nuova', 'crea', 'creare', 'aggiungi', 'invita', 'modifica', 'cambia',
+    'rinomina', 'configura', 'connetti', 'assegna', 'gestisci',
+    // TR PL UZ KZ
+    'yeni', 'oluştur', 'olustur', 'ekle', 'davet', 'düzenle', 'duzenle', 'değiştir', 'degistir', 'yapılandır', 'yapilandir', 'bağla', 'bagla',
+    'nowy', 'nowa', 'nowe', 'utwórz', 'utworz', 'dodaj', 'zaproś', 'zapros', 'edytuj', 'zmień', 'zmien', 'skonfiguruj', 'połącz', 'polacz',
+    'przypisz', 'yangi', 'yaratish', 'qoshish', 'taklif', 'tahrirlash', 'ozgartirish', 'янги', 'қўшиш', 'таҳрирлаш',
+    'жаңа', 'құру', 'қосу', 'шақыру', 'өңдеу', 'өзгерту',
+  ];
+  const FORM_WORDS = new Set([...FORM_NAV, ...FORM_MAKE].map(fold));
+  // Opener verbs that finish a form when they sit inside one.
+  const FORM_FINISH = new Set(['создать', 'создайте', 'пригласить', 'пригласите', 'назначить', 'назначьте', 'подключить', 'create', 'invite',
+    'dispatch', 'assign', 'connect', 'upload', 'log', 'schedule', 'erstellen', 'einladen', 'zuweisen', 'crear', 'invitar', 'asignar', 'criar', 'convidar', 'atribuir', 'créer',
+    'creer', 'inviter', 'assigner', 'crea', 'creare', 'invita', 'assegna', 'oluştur', 'olustur', 'davet', 'utwórz', 'utworz', 'zaproś', 'zapros',
+    'przypisz', 'yaratish', 'taklif', 'құру', 'шақыру'].map(fold));
+  const FORM_NAV_SET = new Set(FORM_NAV.map(fold));
+  // Chinese, Japanese, Korean: no word boundaries; a label that starts with one of these.
+  const FORM_CJK = ['新建', '新增', '创建', '創建', '添加', '邀请', '邀請', '编辑', '編輯', '修改', '更改', '重命名', '配置', '设置', '設定',
+    '连接', '連接', '分配', '新規', '作成', '追加', '招待', '編集', '変更', '만들기', '추가', '초대', '편집', '수정', '변경', '새'];
+  const FORM_CJK_NAV = ['打开', '打開', '查看', '详情', '詳情', '更多', '開く', '詳細', 'もっと見る', '열기', '보기', '상세', '더보기'];
+  // Opener verb + object that is itself a write: the masked text would no longer show it.
+  const FORM_VETO = /^(?:add to (?:cart|bag|basket|order|wishlist|favou?rites)|add (?:funds|money|credit|balance)|добавить в (?:корзину|избранное|заказ)|new session|connect wallet)(?: |$)/;
+  // "+", "＋ New load", "⋯", "⋮", "…", "•••", "..." (icon buttons for more actions).
+  const FORM_GLYPH = /^\s*(?:[+＋](?!\s*\d)|[⋯⋮…]|\.\.\.|•••|···)/; // "+10%" is a number
+  // Dialog verbs: they open a form only with an object ("Upload document"); bare ("Upload") they are the commit.
+  // "Log" is never "Log out / off / in / on".
+  const DIALOG_VERB = new Set(['upload', 'log', 'schedule']);
+  const LOG_SESSION = /^log ?(?:out|off|in|on|into)(?: |$)/;
+  // What "Log …" records is a noun there, not a veto verb: "Log fuel purchase", "Log payment", "Log expense".
+  const LOG_OBJECT = new Set(['purchase', 'purchases', 'payment', 'payments', 'expense', 'expenses', 'charge', 'charges', 'refund', 'refunds',
+    'transfer', 'transfers', 'order', 'orders', 'sale', 'sales']);
+  /** The opener words removed, so the rest of the text can go through the full veto. label: the control's own label. */
+  function maskForm(s, label) {
+    let t = String(s == null ? '' : s);
+    for (const w of FORM_CJK.concat(FORM_CJK_NAV)) if (t.includes(w)) t = t.split(w).join(' ');
+    const logs = /^log(?: |$)/.test(dnorm(label === undefined ? s : label));
+    return dnorm(t).split(' ').filter(w => w && !FORM_WORDS.has(w) && !(logs && LOG_OBJECT.has(w))).join(' ');
+  }
+  // Veto phrases that start with an opener word are not excused by it: «Neu starten», "Add to cart" (the opener word
+  // alone is harmless, so the phrase is what the veto saw). Except the plan form behind «Сменить тариф».
+  const PHRASE_OK = /^(?:сменить тариф|изменить тариф|change plan|change your plan|davet et)(?: |$)/;
+  /** May this label be pressed as a form opener? Only its opener words may explain a veto hit. */
+  function formLabelOk(label) {
+    const lab = dnorm(label);
+    if (FORM_VETO.test(lab)) return false;
+    if (!isDangerText(label)) return true;
+    if (isDangerText(maskForm(label, label))) return false;
+    if (PHRASE_OK.test(lab)) return true;
+    return lab.split(' ').some(w => (FORM_WORDS.has(w) || (/^log /.test(lab) && LOG_OBJECT.has(w))) && isDangerText(w)) || FORM_CJK.some(w => String(label).includes(w) && isDangerText(w));
+  }
+  /** 'make' | 'nav' | null: does the label start with an opener verb (or an opener glyph)? */
+  function formVerb(label) {
+    const raw = String(label || '').trim();
+    if (!raw) return null;
+    if (FORM_GLYPH.test(raw)) return 'make';
+    for (const w of FORM_CJK) if (raw.startsWith(w)) return 'make';
+    for (const w of FORM_CJK_NAV) if (raw.startsWith(w)) return 'nav';
+    const words = dnorm(raw).split(' '), first = words[0];
+    if (!first || !FORM_WORDS.has(first)) return null;
+    if (DIALOG_VERB.has(first) && (words.length < 2 || LOG_SESSION.test(words.join(' ')))) return null; // "Upload", "Log out"
+    return FORM_NAV_SET.has(first) ? 'nav' : 'make';
+  }
+
+  // Pagination and "load more" are never pressed; sort and filter controls once per view.
+  const PAGER = /^(?:next|prev|previous|first|last|older|newer|load more|show more|see more|view more|more results|next page|previous page|go to page \d+|page \d+|далее|вперед|назад|следующая|предыдущая|первая|последняя|показать еще|загрузить еще|еще \d+|страница \d+)$/;
+  const PAGER_BOX = '[class*=pagination i],[class*=pager i],[aria-label*=pagination i],[aria-label*=пагинац i],[aria-label*=страниц i]';
+  const LISTING = /^(?:filters?|фильтр\w*|sort\w*|сортир\w*|сортировка|order by|group by|группир\w*)(?: |$)/;
+  // A bare page number ("2") is a pager; "↳ #1042" or "#1061 El Paso" is a record.
+  const pagerLike = (el, label) => PAGER.test(dnorm(label)) || /^(?:[«»‹›<>←→]+|\d{1,4})$/.test(String(label || '').trim()) || !!el.closest(PAGER_BOX);
+  // A status tab with a count («Available 3», "Inbox 12») filters the list it sits over: a filter chip, once per view.
+  const listingLike = (el, label) => LISTING.test(dnorm(label)) || !!el.closest('th,[role=columnheader],[aria-sort]')
+    || (!!el.closest('[class*=chip i]') && !el.hasAttribute('aria-haspopup'))
+    || (roleOf(el) === 'tab' && /\s\(?\d[\d\s.,]*\)?$/.test(String(label || '').trim()));
+
+  // Fields a user fills in. Search boxes and filters in a toolbar are not a form.
+  const FIELD_SEL = 'input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=reset]):not([type=image]):not([type=search]),select,textarea,[contenteditable=""],[contenteditable=true],[role=textbox],[role=combobox],[role=spinbutton]';
+  const SEARCHY = /search|query|filter|поиск|найти|фильтр|^q$/i;
+  function isField(f) {
+    if (ours(f) || !shown(f)) return false;
+    if (f.closest('[role=search],[role=toolbar],search')) return false;
+    return ![f.getAttribute('type'), f.getAttribute('name'), f.id, f.getAttribute('placeholder'), f.getAttribute('aria-label')].some(v => v && SEARCHY.test(v));
+  }
+  // Remembered for 400 ms: one capture asks about the same few boxes for every button in them.
+  let fieldMemo = { at: 0, map: null };
+  function hasFields(n) {
+    const now = Date.now();
+    if (!fieldMemo.map || now - fieldMemo.at > 400) fieldMemo = { at: now, map: new WeakMap() };
+    const known = fieldMemo.map.get(n);
+    if (known !== undefined) return known;
+    let k = 0, found = false;
+    for (const f of n.querySelectorAll(FIELD_SEL)) { if (++k > 40) break; if (isField(f)) { found = true; break; } }
+    fieldMemo.map.set(n, found);
+    return found;
+  }
+  // A <form> around the whole app (ASP.NET WebForms) is not "a form".
+  const wrapperForm = f => !!f.querySelector('main,nav,aside,[role=main],[role=navigation]');
+  const SCOPE_STOP = 'main,[role=main],body,html,[role=tabpanel],article';
+  /** The form, fieldset or small box up to 3 levels up that holds fields next to this control; null at page level. */
+  function fieldScope(el) {
+    const form = (el.form && el.form.nodeType === 1 ? el.form : null) || el.closest('form,[role=form]');
+    if (form && !wrapperForm(form)) return hasFields(form) ? form : null;
+    const fs = el.closest('fieldset');
+    if (fs && hasFields(fs)) return fs;
+    for (let n = el.parentElement, i = 0; n && i < 3; n = n.parentElement, i++) {
+      if (n.matches(SCOPE_STOP) || n.querySelector('h1')) return null;
+      if (hasFields(n)) return n;
+    }
+    return null;
+  }
+  const PRIMARY = /primary|cta|submit|success|accent|main-action|btn-dark|is-info/i;
+  // Commit-like words that are not in the veto list (it already holds save, send, apply, confirm …).
+  const COMMIT_EXTRA = /^(?:ok|okay|ок|update|log ?in|sign ?in|sign ?up|register|войти|зарегистр\p{L}*|create account|готово)(?: |$)/u;
+  const buttonLike = el => el.tagName === 'BUTTON' || (el.tagName === 'INPUT' && /^(submit|button|image)$/i.test(el.type)) || roleOf(el) === 'button';
+  const isCloser = label => { const l = low(label); return CLOSE.has(l) || CLOSE_ARIA.test(l) || GLYPH.test(l); };
+
+  /** Does this control finish a form or dialog? Pure DOM, no state. label: its name when the caller has it. */
+  function commitOf(el, name) {
+    if (!el || el.nodeType !== 1 || ours(el) || !buttonLike(el)) return false;
+    if (TOGGLE_ROLE.test(roleOf(el)) || el.hasAttribute('aria-pressed') || el.hasAttribute('aria-checked')) return false;
+    const popup = el.getAttribute('aria-haspopup');
+    if ((popup && popup !== 'false') || el.hasAttribute('aria-expanded')) return false; // a menu trigger
+    const label = name !== undefined ? name : S.labelOf ? S.labelOf(el) : String(el.textContent || '');
+    if (label && (isCloser(label) || pagerLike(el, label))) return false;
+    const form = (el.form && el.form.nodeType === 1 ? el.form : null) || el.closest('form');
+    const submit = (el.tagName === 'BUTTON' && el.type === 'submit') || (el.tagName === 'INPUT' && /^(submit|image)$/i.test(el.type));
+    if (form && submit && !wrapperForm(form)) return true;
+    if (!label) return false;
+    const dlg = el.closest(DIALOG);
+    if (!dlg && !fieldScope(el)) return false;
+    if (/filter|фильтр|reset view/i.test(label)) return false; // "Clear filters" next to filter fields resets a list
+    const verb = formVerb(label);
+    const first = dnorm(label).split(' ')[0];
+    // "+ Add stop" (a stop is a noun here) adds a row next to fields: an opener verb that does not finish a form
+    // decides before the veto words, outside a dialog.
+    if (verb === 'make' && !dlg && !FORM_FINISH.has(first)) return !form && PRIMARY.test(classOf(el));
+    if (isDangerText(label) || COMMIT_EXTRA.test(dnorm(label))) return true;
+    // «Добавить» in a dialog footer, "Create load" under fields; in a <form>, "Add line" adds a row but
+    // "Create load" / "Invite" / "Dispatch" finish it.
+    // "+ Add stop" under fields adds a row; outside a dialog only create/invite/dispatch-like verbs (or a primary
+    // button) finish a form.
+    // A bare dialog verb ("Upload", "Schedule", "Log") is the dialog's or the form's own commit.
+    if ((verb === 'make' || (DIALOG_VERB.has(first) && !LOG_SESSION.test(dnorm(label)))) && (dlg || FORM_FINISH.has(first))) return true;
+    return !!dlg && PRIMARY.test(classOf(el));
+  }
+  /** Looks like it opens a form, a dialog or a record: an opener verb, a glyph, or aria-haspopup="dialog". */
+  function openerLike(el, name) {
+    if (!el || el.nodeType !== 1) return false;
+    const role = roleOf(el);
+    if (!/^(button|link|menuitem)$/.test(role) && el.tagName !== 'SUMMARY') return false;
+    if (el.getAttribute('aria-haspopup') === 'dialog') return true;
+    const label = name !== undefined ? name : S.labelOf ? S.labelOf(el) : String(el.textContent || '');
+    return !!formVerb(label) && !pagerLike(el, label);
+  }
+  // Page-level <a> that acts as a button: no address of its own.
+  const buttonAnchor = el => {
+    const raw = el.getAttribute('href');
+    if (el.hasAttribute('download') || (el.getAttribute('target') || '').replace('_self', '')) return false;
+    return !raw || (/^#/.test(raw) && !/^#[!/]/.test(raw)) || /^javascript:\s*(void|;|$)/i.test(raw);
+  };
+
+  // Set per walk (start/boot) and by snapshot()/tests: may form openers be pressed?
+  let formsOn = false;
+  const inExtension = () => { try { return typeof chrome !== 'undefined' && !!(chrome && chrome.runtime && chrome.runtime.id); } catch (e) { return false; } };
+  /**
+   * Form openers are pressed only when writes are blocked below the page:
+   *  - extension: opts.netBlocked === true (on resume, the value saved at start when opts leaves it out);
+   *  - SDK (opts.sdk === true, or no extension runtime): the page guard confirmed (guard.on() resolved true);
+   *  - opts.forms === false: never.
+   */
+  function formsAllowed(o, guardOk, savedNet) {
+    if (!o || o.forms === false) return false;
+    const sdk = o.sdk === true || (o.sdk !== false && !inExtension());
+    if (sdk) return guardOk === true;
+    return (o.netBlocked !== undefined ? o.netBlocked : savedNet) === true;
+  }
+
+  /** A form opener the explorer may press (formsOn is checked by the caller). */
+  function formKind(el, role) {
+    const T = el.tagName;
+    if (T === 'A' ? !buttonAnchor(el) : !/^(button|link|menuitem)$/.test(role)) return false;
+    const label = S.labelOf ? S.labelOf(el) : String(el.textContent || '');
+    if (!formVerb(label) || pagerLike(el, label) || !formLabelOk(label)) return false;
+    if (el.closest(DIALOG) || fieldScope(el) || commitOf(el)) return false; // commit context
+    // Only the opener verb is excused: everything else the element says goes through the full veto.
+    if (isDangerText(maskForm(textOf(el), label)) || DANGER_CLASS.test(classOf(el)) || fwCheck(el, true)) return false;
+    return true;
+  }
 
   const wait = ms => new Promise(r => setTimeout(r, ms));
   // One macrotask boundary, so input and rendering run between chunks of a long capture.
@@ -429,21 +686,26 @@
     if ((T === 'INPUT' && !/^button$/i.test(el.type)) || T === 'SELECT' || T === 'TEXTAREA' || el.isContentEditable) return null;
     // A <button> is type "submit" by default; inside a form it would send it.
     if (T === 'BUTTON' && (el.type === 'submit' || el.type === 'reset') && (el.form || el.closest('form'))) return null;
-    if (T === 'A' && !anchorTrigger(el)) return null; // links are followed by address, never clicked
+    // Links are followed by address, never clicked; an <a href="#"> that acts as a button may be a form opener.
+    const form = formsOn && formKind(el, role);
+    if (T === 'A' && !anchorTrigger(el)) return form ? 'form' : null;
     if (T !== 'SUMMARY' && !/^(button|tab|menuitem|treeitem|link)$/.test(role)) return null;
+    const label = S.labelOf ? S.labelOf(el) : el.textContent;
+    if (pagerLike(el, label) || FORM_VETO.test(dnorm(label))) return null; // pagination, "load more"; "Add to cart", "Add funds"
     // hx-post/put/patch/delete, phx-submit, wire:submit, data-method="delete" (here or on an ancestor the click
     // bubbles to), a handler that names an action, or any risky word anywhere in the element: never pressed.
-    if (danger(el)) return null;
+    // A form opener («Пригласить коллегу») passed the same veto with only its leading opener verb excused.
+    if (danger(el)) return form ? 'form' : null;
     if (role === 'tab') return 'tab';
     if (T === 'SUMMARY') return 'disclosure';
     const popup = el.getAttribute('aria-haspopup');
-    if (popup && popup !== 'false') return 'menu';
+    if (popup && popup !== 'false') return popup === 'dialog' && commitOf(el) ? null : 'menu';
     if (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls')) return 'disclosure';
-    if (role !== 'button') return null; // menu items and tree items act; only their submenus open
-    if (OPENER.test(norm(S.labelOf ? S.labelOf(el) : el.textContent))) return 'opener';
-    // Everything else («Пригласить коллегу», «Сменить тариф», Watch, Follow …) is not pressed: the allow-list is
-    // the safety, not the guard. What such a button opens is learned only when an opener reveals the same dialog.
-    return null;
+    if (role !== 'button') return form ? 'form' : null; // menu items and tree items act; only their submenus open
+    if (OPENER.test(norm(label)) && !commitOf(el)) return 'opener';
+    // Everything else («Пригласить коллегу», «Сменить тариф», Watch, Follow …) is pressed only as a form opener,
+    // with writes blocked below the page; otherwise never. Commits («Сохранить», "Send invite") never.
+    return form ? 'form' : null;
   }
 
   // ---------------- links ----------------
@@ -465,7 +727,7 @@
     if (u.pathname === location.pathname && u.search === location.search && u.hash && !/^#[!/]/.test(u.hash)) return null; // #section on this page
     if (NON_HTML.test(u.pathname)) return null;
     // The address strictly (every action verb, in any language); the text only for words that say the link acts.
-    if (isDangerAddress(u.href)) return null;
+    if (unsafeAddress(u.href)) return null;
     if (linkTextDanger(linkText(a)) || DANGER_CLASS.test(classOf(a))) return null;
     if (fwCheck(a)) return null; // hx-post / data-method / an onclick that names an action
     return u.href;
@@ -692,19 +954,78 @@
    * Turns the guard on and waits for the page-world patch: S.guard.on() may only send 'guard:inject' to the
    * extension and return. Resolves when <html data-scopos-guard-main="1"> appears (or on() confirms), or after
    * 1.5 s. The walk then goes on either way: only tabs, disclosures, menus and openers are ever pressed.
+   * { ok, confirmed }: confirmed only when on() itself resolved true (the attribute can be written by any page
+   * script); form openers in SDK mode need confirmed. Waits up to 2.5 s for on() to settle.
    */
   async function guardOn() {
-    if (!S.guard || typeof S.guard.on !== 'function') return false;
-    let confirmed = false, p = null;
+    if (!S.guard || typeof S.guard.on !== 'function') return { ok: false, confirmed: false };
+    let confirmed = false, settled = false, p = null;
     try { p = S.guard.on(); } catch (e) { p = null; }
-    if (p && typeof p.then === 'function') p.then(ok => { if (ok) confirmed = true; }, () => {});
+    if (p && typeof p.then === 'function') p.then(ok => { confirmed = ok === true; settled = true; }, () => { settled = true; });
+    else { confirmed = p === true; settled = true; }
     const main = () => { try { return document.documentElement.getAttribute('data-scopos-guard-main') === '1'; } catch (e) { return false; } };
     const t0 = Date.now();
-    while (!confirmed && !main() && Date.now() - t0 < 1500) await wait(50);
-    return confirmed || main();
+    while (!settled && Date.now() - t0 < 2500) await wait(50);
+    return { ok: confirmed || main(), confirmed };
   }
   const guardOff = () => { try { if (S.guard) S.guard.off(); } catch (e) { /* ignore */ } };
   const blockedCount = () => { try { return S.guard ? S.guard.blocked() : 0; } catch (e) { return 0; } };
+  // Writes the network block stopped, when the host can tell (opts.netBlocks: () => number | Promise<number>).
+  async function netCount() {
+    if (!opts || typeof opts.netBlocks !== 'function') return 0;
+    try { return Number(await Promise.race([Promise.resolve(opts.netBlocks()), wait(400).then(() => 0)])) || 0; } catch (e) { return 0; }
+  }
+
+  // Navigation fence (Navigation API): while the walk runs, a press may not take the tab to another origin,
+  // start a download, post a form or open an address that acts. Our own goTo() navigations are let through.
+  let fence = null, fenceNav = null, fenced = 0, navAllow = '';
+  function fenceOn() {
+    if (fence) return;
+    let nav = null;
+    try { nav = typeof navigation !== 'undefined' ? navigation : null; } catch (e) { nav = null; }
+    if (!nav || typeof nav.addEventListener !== 'function') return;
+    fence = e => {
+      try {
+        if (!st || st.status !== 'running' || !e.cancelable) return;
+        if (e.navigationType === 'reload' || e.navigationType === 'traverse') return;
+        const u = new URL(e.destination.url);
+        if (navAllow && u.href === navAllow) return;
+        const samePage = u.origin === location.origin && u.pathname === location.pathname && u.search === location.search && !/^#[!/]/.test(u.hash);
+        const bad = !!e.downloadRequest || !!e.formData || u.origin !== st.origin || (!samePage && unsafeAddress(u.href));
+        if (bad) { e.preventDefault(); fenced++; }
+      } catch (x) { /* never break the page's own navigation on our error */ }
+    };
+    try { nav.addEventListener('navigate', fence); fenceNav = nav; } catch (e) { fence = null; }
+  }
+  function fenceOff() {
+    try { if (fence && fenceNav) fenceNav.removeEventListener('navigate', fence); } catch (e) { /* ignore */ }
+    fence = null; fenceNav = null;
+  }
+
+  // Form pages at their own address (/loads/new, /drivers/add, /team/invite): the last segment names the form,
+  // there is no query, and the rest of the address is safe. Only while form openers are allowed: a GET to such an
+  // address shows a form. /cart/add?id=5 and /wishlist/add/5 stay refused.
+  const FORM_ROUTE = new Set(['add', 'new', 'create', 'invite', 'edit']);
+  function formRoute(href) {
+    if (!formsOn) return false;
+    let u;
+    try { u = new URL(href, typeof location !== 'undefined' && location.href ? location.href : 'http://scopos.invalid/'); } catch (e) { return false; }
+    if (u.search) return false;
+    let last, rest;
+    if (/^#[!/]/.test(u.hash)) {
+      const [hp, hq] = u.hash.slice(2).split('?');
+      if (hq) return false;
+      const hs = hp.split('/').filter(Boolean);
+      last = hs.pop(); rest = `${u.origin}${u.pathname}#/${hs.join('/')}`;
+    } else {
+      const segs = u.pathname.split('/').filter(Boolean);
+      last = segs.pop(); rest = `${u.origin}/${segs.join('/')}`;
+    }
+    let w = last || '';
+    try { w = decodeURIComponent(w); } catch (e) { /* keep */ }
+    return FORM_ROUTE.has(dnorm(w)) && !isDangerAddress(rest);
+  }
+  const unsafeAddress = h => isDangerAddress(h) && !formRoute(h);
 
   // A screen reached by a press or a redirect at an address that acts (/items/5/archive, /cart/add?id=5):
   // kept as a title only, never queued, never navigated to again.
@@ -730,7 +1051,7 @@
       if (u.origin !== st.origin) return null; // origin lock
       if (st.n.pages >= LIMITS.views) return null;
       st.n.pages++;
-      if (check !== false && (isDangerAddress(check || url) || isDangerAddress(url))) return unsafeView(key, kind, parent);
+      if (check !== false && (unsafeAddress(check || url) || unsafeAddress(url))) return unsafeView(key, kind, parent);
     } else {
       if (st.n.extra >= LIMITS.extra) return null;
       st.n.extra++;
@@ -755,11 +1076,43 @@
     return kinds.get(el);
   };
 
-  function control(v, x, i, inner, d, kinds) {
+  /**
+   * One control of a view. Kept in the walk state with short internal flags (toMap turns them into the map fields):
+   * commit (finishes a form or dialog), ol (opener-like: unexplored unless it was opened), hot (global header or
+   * navigation: pressed once per walk), ls (sort/filter: once per view). snap: for snapshot(), no links queued, no probe.
+   */
+  function control(v, x, i, inner, d, kinds, snap) {
     if (d === undefined) { try { d = S.describe(x.el); } catch (e) { d = null; } }
     d = d ? slim(d) : null;
     const c = { ref: `${v.id}.${i + 1}`, role: x.role, name: x.name, section: x.section, state: x.state, d };
     if (x.options !== undefined) c.options = x.options;
+    try {
+      const nm = /^icon: /.test(x.name || '') ? '' : String(x.name || '').replace(/…$/, ''); // the name the inventory already read
+      if (commitOf(x.el, nm)) c.commit = true;
+      else if (openerLike(x.el, nm)) c.ol = 1;
+    } catch (e) { /* a detached node: no flags */ }
+    // A row control (scan.js rowInfo: the same role at the same place in every row of a data table or list, the
+    // label differing only by record data): one key per table, place and label pattern. The map keeps one of
+    // them (row: true, rowLabel) and guides point at "the record you need", never at the sample's row.
+    const ro = d && d.fp && d.fp.rowOf;
+    if (ro) {
+      c.rk = [x.role, ro.row, (ro.box && ro.box.name) || '', ((ro.box && ro.box.head) || []).join(','), ro.col, ro.nth, ro.pre, ro.suf, ro.data ? 1 : 0].join('|');
+      c.rowLabel = ro.label;
+    }
+    if (snap) return c;
+    if (globalControl(x.el)) c.hot = 1;
+    if (listingLike(x.el, x.name)) c.ls = 1;
+    // Twins: controls repeated per record (a row's "Edit Marcus Reed", "Actions for load 1040", a board card) share
+    // one key per view: the row key above, else role, section and the leading opener word. Pressed once; the others
+    // share where it led.
+    if (c.rk) c.tw = c.rk;
+    else if (x.el.closest(ROW_SEL + ',[draggable=true]')) {
+      const first = dnorm(x.name).split(' ')[0] || '';
+      c.tw = `${x.role}|${x.section || ''}|row|${FORM_WORDS.has(first) ? first : '#'}`;
+    } else if (x.el.getAttribute('aria-haspopup') === 'dialog' && !formVerb(x.name)) {
+      // Record cards that open a record dialog (a dispatch board's load chips): one per class of card.
+      c.tw = `${x.role}|${x.section || ''}|card|${classOf(x.el).trim().split(/\s+/)[0] || ''}`;
+    }
     if (x.el.tagName === 'A' && x.el.hasAttribute('href')) {
       const t = linkView(x.el);
       if (t) c.to = t.key;
@@ -784,9 +1137,37 @@
   }
 
   // Cap per view: navigation and header first, then what can be pressed or followed, then the rest.
+  /**
+   * On every page, not part of this screen: the header and navigation, a floating "Customize" or help button
+   * (fixed or sticky), anything outside <main> when the page has one. Pressed once per walk.
+   */
+  function globalControl(el) {
+    if (el.closest(CHROME) && !el.closest('main,[role=main],article,section,' + DIALOG)) return true;
+    if (el.closest(DIALOG)) return false;
+    const main = document.querySelector('main,[role=main]');
+    if (main && !ours(main) && !main.contains(el)) return true;
+    for (let n = el, i = 0; n && n.nodeType === 1 && i < 4 && n !== document.body; n = n.parentElement, i++) {
+      const pos = getComputedStyle(n).position;
+      if (pos === 'fixed' || pos === 'sticky') return true;
+    }
+    return false;
+  }
+
+  // Navigation first, then the content in page order; a control repeated in rows (the 3rd "Edit", the 3rd record
+  // link of a table) goes last, so a long list does not push the form fields and the Save button out.
+  // kinds null (snapshot): no pressKind (it reads innerText).
+  const ROW_SEL = 'tr,[role=row],li,[role=listitem]';
   function pick(list, kinds) {
     if (list.length <= LIMITS.controls) return list;
-    const rank = x => (x.el.closest(CHROME) ? 0 : x.el.tagName === 'A' || kindIn(kinds, x.el) ? 1 : 2);
+    const seen = {};
+    const repeat = x => {
+      if (!x.el.closest(ROW_SEL)) return false;
+      const k = `${x.role}|${x.role === 'link' ? '*' : x.name}`;
+      seen[k] = (seen[k] || 0) + 1;
+      return seen[k] > 2;
+    };
+    const act = x => (kinds ? kindIn(kinds, x.el) : x.role === 'button' || x.role === 'tab');
+    const rank = x => (x.el.closest(CHROME) && !x.el.closest('main,[role=main]') ? 0 : repeat(x) ? 3 : x.el.tagName === 'A' || act(x) || FIELD_ROLE.test(x.role) ? 1 : 2);
     const keep = new Set(list.map((x, i) => [rank(x), i]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).slice(0, LIMITS.controls).map(p => p[1]));
     return list.filter((x, i) => keep.has(i));
   }
@@ -926,18 +1307,106 @@
       const p = n.isConnected && n.closest ? n.closest('[role=tabpanel],details') : null;
       if (p && !ours(p) && shown(p)) return p;
     }
+    // The whole screen was re-rendered: the visible tab panel inside it.
+    for (const n of nodes) {
+      if (!n.isConnected || !n.querySelectorAll) continue;
+      const p = [...n.querySelectorAll('[role=tabpanel]')].find(x => !ours(x) && shown(x));
+      if (p) return p;
+    }
     return null;
+  }
+
+  const pageTitle = () => { const h1 = document.querySelector('h1'); return mask((h1 && !ours(h1) && h1.textContent) || document.title).replace(/\s+/g, ' ').trim().slice(0, 80); };
+  function viewHead(v, container) {
+    v.title = container ? dialogTitle(container).slice(0, 80) : pageTitle();
+    v.headings = [...(container || document).querySelectorAll('h1,h2,h3')].filter(h => !ours(h)).slice(0, 8).map(h => mask(h.textContent).replace(/\s+/g, ' ').trim().slice(0, 60));
+    v.facts = factsOf(container || factRoot(), [v.title, ...v.headings]);
   }
 
   async function captureView(v, container) {
     const kinds = new Map();
     const list = pick(inventory(container), kinds);
-    const h1 = document.querySelector('h1');
-    v.title = mask(container ? dialogTitle(container) : (h1 && !ours(h1) && h1.textContent) || document.title).replace(/\s+/g, ' ').trim().slice(0, 80);
-    v.headings = [...(container || document).querySelectorAll('h1,h2,h3')].filter(h => !ours(h)).slice(0, 8).map(h => mask(h.textContent).replace(/\s+/g, ' ').trim().slice(0, 60));
-    v.facts = factsOf(container || factRoot(), [v.title, ...v.headings]);
+    viewHead(v, container);
     v.controls = await controlsOf(v, list, !!container, kinds);
+    v.controls.push(...regionControls(v, container || factRoot(), v.controls.length, !!container));
     v.captured = true;
+  }
+
+  // ---------------- regions: tables and lists a "look at …" step can point at ----------------
+  const REGION_SEL = 'table,[role=table],[role=grid],[role=treegrid],[role=list],[role=feed],ul,ol,[role=region][aria-label],[role=region][aria-labelledby],section[aria-label],section[aria-labelledby]';
+  const REGION_SKIP = `[role=menu],[role=menubar],[role=tablist],[role=listbox],[role=tree],nav,[role=navigation],${PAGER_BOX}`;
+  const HEADINGS = 'h1,h2,h3,h4,h5,h6,[role=heading],legend';
+  // The nearest heading before the region in reading order (its previous siblings, then up six levels: a table in a
+  // scroll box in a tab panel in a card is still named by the page heading above the card).
+  function nearHeading(el) {
+    for (let n = el, up = 0; n && up < 6 && n !== document.body; n = n.parentElement, up++) {
+      let k = 0;
+      for (let s = n.previousElementSibling; s && k < 8; s = s.previousElementSibling, k++) {
+        if (ours(s)) continue;
+        if (s.matches(HEADINGS)) return s.textContent;
+        const hs = s.querySelectorAll(HEADINGS);
+        if (hs.length) return hs[hs.length - 1].textContent;
+      }
+    }
+    return '';
+  }
+  function regionName(el) {
+    let n = el.tagName === 'TABLE' && el.caption ? el.caption.textContent : '';
+    const by = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).map(id => { const x = document.getElementById(id); return x ? x.textContent : ''; }).join(' ');
+    n = n || by || el.getAttribute('aria-label') || nearHeading(el);
+    return mask(String(n || '')).replace(/\s+/g, ' ').trim().slice(0, 60);
+  }
+  /** Up to LIMITS.regions named tables, lists and regions of the content: { el, role, name }. */
+  function regionsIn(root, inDialog) {
+    const out = [];
+    if (!root || !root.querySelectorAll) return out;
+    let seen = 0;
+    for (const el of root.querySelectorAll(REGION_SEL)) {
+      if (out.length >= LIMITS.regions || ++seen > 300) break;
+      if (ours(el) || foreign(el) || el.closest(REGION_SKIP)) continue;
+      if (!inDialog && el.closest(DIALOG)) continue;
+      if (el.closest(CHROME) && !el.closest('main,[role=main]')) continue; // navigation lists
+      if (out.some(o => o.el.contains(el) || el.contains(o.el))) continue;
+      if (!shown(el)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 120 || r.height < 40) continue;
+      const T = el.tagName, er = (el.getAttribute('role') || '').toLowerCase();
+      const role = /^(table|grid|treegrid)$/.test(er) || (!er && T === 'TABLE') ? 'table' : /^(list|feed)$/.test(er) || (!er && (T === 'UL' || T === 'OL')) ? 'list' : 'region';
+      if (role === 'list' && [...el.children].filter(shown).length < 2) continue;
+      const name = regionName(el);
+      if (name) out.push({ el, role, name });
+    }
+    return out;
+  }
+  function regionControls(v, root, start, inDialog) {
+    let list = [];
+    try { list = regionsIn(root, inDialog); } catch (e) { list = []; }
+    return list.map((x, i) => {
+      let d = null;
+      try { d = S.describe(x.el); } catch (e) { d = null; }
+      if (d) { d = slim(d); d.text = x.name; }
+      return { ref: `${v.id}.${start + i + 1}`, role: x.role, name: x.name, section: '', state: '', d, probe: 'skip', rg: 1 };
+    });
+  }
+
+  /**
+   * The current screen as ONE view in the toMap format (see the top of this file). Synchronous, presses
+   * nothing, keeps no state: the content script calls it on route changes to grow the map for free.
+   */
+  function snapshot() {
+    const dlg = openDialogs().pop() || null;
+    let key;
+    try { key = pageKey(); } catch (e) { key = location.pathname || '/'; }
+    const v = { id: 'P', kind: dlg ? 'dialog' : 'page' };
+    try { v.url = cleanUrl(location.href); } catch (e) { v.url = ''; }
+    const list = pick(inventory(dlg || undefined), null);
+    viewHead(v, dlg);
+    let ds = null;
+    try { ds = S.describeMany ? S.describeMany(list.map(x => x.el), {}) : null; } catch (e) { ds = null; }
+    v.controls = list.map((x, i) => control(v, x, i, true, ds ? ds[i] || null : undefined, null, true));
+    v.controls.push(...regionControls(v, dlg || factRoot(), v.controls.length, !!dlg));
+    v.key = dlg ? `${key} › ${v.title}` : key;
+    return viewOut(v, dlg ? { title: pageTitle() } : v, () => undefined);
   }
 
   // Keep the saved state under ~1.5 MB: drop the least useful data first.
@@ -970,21 +1439,46 @@
 
   // ---------------- navigation ----------------
   /** 'here' when on the view, 'leaving' when a full load started, 'skip' when it can't be reached. */
+  // The page a view lives on (a tab panel: the page its tab is on).
+  function homeKey(v) {
+    let x = v;
+    for (let i = 0; x && x.enter && i < 5; i++) x = st.views[x.enter.page];
+    return x ? x.key : v.key;
+  }
+  /** A tab panel: go to its page, then press its tab (only when it is not selected already). */
+  async function enterPanel(v) {
+    const parent = st.views[v.enter.page];
+    if (!parent || parent === v) return 'skip';
+    const at = await goTo(parent);
+    if (at !== 'here') return at;
+    const c = (parent.controls || []).find(x => x.ref === v.enter.ref);
+    const f = c ? refind(c) : null;
+    if (!f || f.kind !== 'tab') return 'skip';
+    if (f.el.getAttribute('aria-selected') !== 'true') {
+      if (!press(f.el)) return 'skip';
+      await settle();
+    }
+    return 'here';
+  }
+
   async function goTo(v) {
+    if (v.enter) return enterPanel(v);
     if (pageKey() === v.key) return 'here';
     if ((v.fails || 0) >= 2) return 'skip';
     let a;
     try { a = new URL(v.url, location.href); } catch (e) { return 'skip'; }
     if (a.origin !== st.origin) return 'skip';
     // Never (re)open an address that acts. The start view was opened by the user and is exempt.
-    if (v.status === 'unsafe' || (!v.start && isDangerAddress(a.href))) { v.status = 'unsafe'; return 'skip'; }
+    if (v.status === 'unsafe' || (!v.start && unsafeAddress(a.href))) { v.status = 'unsafe'; return 'skip'; }
     if (a.origin + a.pathname + a.search === location.origin + location.pathname + location.search && a.hash) {
+      navAllow = a.href;
       location.hash = a.hash; // same document: the SPA re-renders in place
       await settle();
       return pageKey() === v.key ? 'here' : 'skip';
     }
     st.nav = { key: v.key, at: Date.now() };
     await save();
+    navAllow = a.href;
     location.href = a.href; // full load: the explorer resumes on the next page
     navWatch(v);
     return 'leaving';
@@ -1011,9 +1505,30 @@
     S.pointer.point(el, { step: st.probes + 1, total: 0, instruction: label, explore: true, onClose: () => { stop(true); } });
   }
 
+  const sigOf = c => `${c.role}|${c.name}|${c.section || ''}`;
+  /**
+   * The next control to press on this view. Never a commit, nor a control already seen writing anywhere.
+   * Same-named controls (a row "Edit" ×50, "⋯" per row) are pressed once per view and share where it led;
+   * global header/navigation controls once per walk; sort/filter controls once per view.
+   */
   function nextProbe(v) {
     if ((v.pressed || 0) >= LIMITS.perView || v.blocked) return null;
-    return v.controls.find(c => c.probe === undefined) || null;
+    v.done = v.done || {};
+    for (const c of v.controls) {
+      if (c.probe !== undefined) continue;
+      const sig = sigOf(c), twin = c.tw || `${c.role}|${c.name}`;
+      if (c.commit || st.commits[sig]) { c.probe = 'commit'; c.commit = true; continue; }
+      if (v.done[twin]) {
+        c.probe = 'twin';
+        const first = v.controls.find(x => x.ref === v.done[twin]);
+        if (first && first.to) c.to = first.to;
+        continue;
+      }
+      if (c.hot && Object.prototype.hasOwnProperty.call(st.seen, sig)) { c.probe = 'twin'; if (st.seen[sig]) c.to = st.seen[sig]; continue; }
+      if (c.ls && (v.lists || 0) >= 1) { c.probe = 'skip'; continue; }
+      return c;
+    }
+    return null;
   }
 
   // ---------------- the walk ----------------
@@ -1037,7 +1552,7 @@
         // Saving costs a full serialization (up to 1.5 MB, through a message or sessionStorage), so the
         // state is written only where a page can go away next: before a press, before navigating or
         // reloading, and at the end. Results in between ride along with the next of those saves.
-        if (at === 'skip' || pageKey() !== v.key) { v.status = v.status || 'unreachable'; st.cur = null; continue; }
+        if (at === 'skip' || pageKey() !== homeKey(v)) { v.status = v.status || 'unreachable'; st.cur = null; continue; }
         if (!v.captured) {
           await settle();
           if (!live(g)) continue;
@@ -1061,7 +1576,10 @@
         if (r === 'leaving') return;
         if (r === 'timeout') { if (c.probe === 'pressed') c.probe = 'timeout'; st.pending = null; }
         fit(); // saved with the next press, navigation or finish
-        if (c.probe !== 'missing' && c.probe !== 'covered') progress(`Нажал «${c.name}»`);
+        if (c.probe !== 'missing' && c.probe !== 'covered') {
+          const t = c.to && st.views[c.to];
+          progress(t && t.title ? `«${c.name}» → ${t.kind === 'dialog' ? 'окно' : t.kind === 'panel' ? 'панель' : 'экран'} «${t.title}»` : c.commit ? `«${c.name}» сохраняет данные: не нажимаю` : `Нажал «${c.name}»`);
+        }
       }
     } catch (e) {
       if (st) st.error = String((e && e.message) || e).slice(0, 200);
@@ -1087,11 +1605,17 @@
     const tablist = kind === 'tab' ? el.closest('[role=tablist]') : null;
     const tabBefore = tablist ? [...tablist.querySelectorAll('[role=tab]')].find(t => t.getAttribute('aria-selected') === 'true') : null;
     const before = new Set(inventory().map(x => x.el));
-    const blocked0 = blockedCount();
+    const blocked0 = blockedCount(), fenced0 = fenced;
+    const net0 = kind === 'form' ? await netCount() : 0;
+    if (!ok()) return;
     c.probe = 'pressed';
+    c.kind = kind;
     // Counted before the press: if it loads another page, the count is already saved.
     v.pressed = (v.pressed || 0) + 1;
     st.probes++;
+    v.done = v.done || {};
+    v.done[c.tw || `${c.role}|${c.name}`] = c.ref;
+    if (c.ls) v.lists = (v.lists || 0) + 1;
     st.pending = { view: v.key, ref: c.ref };
     // The one save per probe, and it has to be the whole state: if the press loads another page,
     // resume() records where it led and must not press this control again.
@@ -1103,10 +1627,20 @@
     const nodes = changes();
     st.pending = null;
     if (!ctx.ok) return;
-    // The guard stopped a write or a prompt: the label lied. Remember it so guides warn about this control.
-    if (blockedCount() > blocked0) { c.probe = 'mutating'; c.state = c.state ? `${c.state}, changes data` : 'changes data'; }
+    // The guard (or the network block) stopped a write or a prompt: the label lied. Remember it so guides warn
+    // about this control; with nothing else visible it is a commit, never pressed again (see the end).
+    const wrote = blockedCount() > blocked0 || (kind === 'form' && (await netCount()) > net0);
+    if (wrote) { c.probe = 'mutating'; c.state = c.state ? `${c.state}, changes data` : 'changes data'; }
     if (!live(g)) return;
+    const r = await outcome(v, c, el, kind, ctx, { beforeKey, beforeDialogs, expandedBefore, tabBefore, before, nodes });
+    if (c.hot) st.seen[sigOf(c)] = c.to || null;
+    if (r) return r;
+    if (!c.to && c.kind !== 'page' && fenced > fenced0) { c.probe = 'external'; return; } // tried to leave: cancelled
+    if (!c.to && c.probe === 'mutating') { c.commit = true; st.commits[sigOf(c)] = 1; }
+  }
 
+  /** What a press did: a new page, a dialog, a panel or nothing. Returns 'leaving' when the document goes away. */
+  async function outcome(v, c, el, kind, ctx, { beforeKey, beforeDialogs, expandedBefore, tabBefore, before, nodes }) {
     const afterKey = pageKey();
     if (afterKey !== beforeKey) {
       const t = location.origin === st.origin ? addView(afterKey, cleanUrl(location.href), 'page', undefined, false, location.href) : null;
@@ -1117,7 +1651,7 @@
 
     const dlg = openDialogs().find(d => !beforeDialogs.includes(d));
     if (dlg) {
-      const key = `${v.key} › ${dialogTitle(dlg)}`;
+      const key = `${homeKey(v)} › ${dialogTitle(dlg)}`; // one per page, whichever of its panels opened it
       const dv = addView(key, v.url, 'dialog', v.key);
       if (dv && !dv.captured) { dv.opener = c.ref; await captureView(dv, dlg); }
       if (dv) c.to = key;
@@ -1128,20 +1662,40 @@
     }
 
     // A menu, a disclosure, a tab panel or an inline form: controls that appeared after the press.
-    const appeared = appearedAfter(el, nodes, before);
-    if (appeared.length || (expandedBefore !== 'true' && el.getAttribute('aria-expanded') === 'true')) {
-      const key = `${v.key} › ${mask(c.name)}`;
+    // Apps that re-render the whole screen on a tab switch bring back the header, the tabs and the toolbar as
+    // "new" nodes: controls the view (or the views it hangs under) already has are not part of the panel.
+    const known = new Set();
+    for (let x = v, i = 0; x && i < 5; x = st.views[x.parent], i++) (x.controls || []).forEach(k => known.add(`${k.role}|${k.name}`));
+    const tablist = el.closest('[role=tablist]');
+    const appeared = appearedAfter(el, nodes, before).filter(x => !known.has(`${x.role}|${x.name}`) && !(tablist && tablist.contains(x.el)));
+    // A tab that switched (re-rendered or not) shows a panel even with no new controls: its facts and tables count.
+    const tabSwitched = kind === 'tab' && tabBefore !== el && !(el.isConnected && el.getAttribute('aria-selected') === 'false');
+    if (appeared.length || tabSwitched || (expandedBefore !== 'true' && el.getAttribute('aria-expanded') === 'true')) {
+      // A tab panel is a screen of its own («Users & Roles» → "Invite user"): its controls are probed later,
+      // after pressing the tab again (mv.enter). Menus, popovers and disclosures stay look-only.
+      // Tab panels are keyed by their page, so the same tab reached from another panel is the same view.
+      const isTab = kind === 'tab' && !(el.tagName === 'A' && safeHref(el));
+      const key = `${isTab ? homeKey(v) : v.key} › ${mask(c.name)}`;
       const mv = addView(key, v.url, 'panel', v.key);
       if (mv && !mv.captured) {
         mv.title = mask(c.name).slice(0, 80); mv.headings = []; mv.opener = c.ref;
         mv.facts = factsOf(panelRoot(el, nodes), [mv.title, v.title, ...(v.headings || []), ...(v.facts || [])]);
-        mv.controls = await controlsOf(mv, appeared.slice(0, LIMITS.controls), true, new Map());
+        mv.controls = await controlsOf(mv, appeared.slice(0, LIMITS.controls), !isTab, new Map());
+        const root = isTab ? panelRoot(el, nodes) : null;
+        if (root) mv.controls.push(...regionControls(mv, root, mv.controls.length, true));
         mv.captured = true;
+        if (isTab && mv.controls.some(x => x.probe === undefined)) { mv.enter = { page: v.key, ref: c.ref }; st.queue.push(key); }
       }
       if (mv) c.to = key;
       c.kind = 'panel';
       // Put the screen back for the next probe: the previous tab, collapse, or Escape.
-      if (tabBefore && tabBefore !== el && tabBefore.isConnected && pressKind(tabBefore) === 'tab') press(tabBefore);
+      let back = tabBefore && tabBefore !== el && tabBefore.isConnected ? tabBefore : null;
+      if (!back && tabBefore && tabBefore !== el) { // re-rendered: the tab that was selected, found again
+        const was = (v.controls || []).find(x => x.role === 'tab' && /(^|, )current(,|$)/.test(x.state || '') && x.ref !== c.ref);
+        const f = was ? refind(was) : null;
+        back = f && f.kind === 'tab' ? f.el : null;
+      }
+      if (back && pressKind(back) === 'tab') press(back);
       else if (el.isConnected && el.getAttribute('aria-expanded') === 'true') press(el);
       else if (el.tagName === 'SUMMARY' && el.parentElement && el.parentElement.open) press(el);
       else escape();
@@ -1178,6 +1732,8 @@
     st.finishedAt = Date.now();
     await save();
     guardOff();
+    fenceOff();
+    formsOn = false;
     S.pointer.hide();
     if (notify && opts) {
       const reason = st.cancelled ? 'cancelled' : st.stopReason === 'redirect' ? 'redirect' : null;
@@ -1188,6 +1744,45 @@
     }
   }
 
+  // Fields a user fills in, by map role (a search box alone is not a form).
+  const FIELD_ROLE = /^(textbox|combobox|select|spinbutton|file|slider|checkbox|radio|switch|listbox)$/;
+  // Where the press led, as far as the guide writer cares: explored controls are not "unexplored".
+  const EXPLORED = new Set(['nothing', 'mutating', 'twin', 'commit']);
+
+  /** One control in the map format. */
+  function controlOut(c, page, idOf, twin) {
+    // A twin that was never reached (the view's press limit) shares what its pressed twin found.
+    if (twin && twin !== c && c.probe === undefined) c = { ...c, to: c.to || twin.to, probe: 'twin' };
+    const to = idOf(c.to);
+    return {
+      ref: c.ref, role: c.role, name: c.name, section: c.section, state: c.state, options: c.options,
+      // Which screen the control lives on, so a guide can say «Перейдите на страницу …».
+      d: c.d ? { ...c.d, view: page.title } : c.d,
+      to,
+      commit: c.commit ? true : undefined,
+      unexplored: c.ol && !c.commit && !to && !EXPLORED.has(c.probe) ? true : undefined,
+      // One per row of a table or list: rowLabel is the label without the record data ("Actions for load …").
+      row: c.rk ? true : undefined,
+      rowLabel: c.rk ? c.rowLabel || undefined : undefined,
+    };
+  }
+  /** One view in the map format (toMap and snapshot share it). */
+  function viewOut(v, page, idOf, parentId) {
+    const pressed = {};
+    for (const c of v.controls || []) if (c.tw && !pressed[c.tw] && (c.to || EXPLORED.has(c.probe) || c.probe === 'pressed')) pressed[c.tw] = c;
+    // A row control is listed once per view (the one that led somewhere, else the pressed one), not once per row.
+    const rep = {}, worth = c => (c.to ? 2 : 0) + (c.probe === 'pressed' || c.probe === 'mutating' ? 1 : 0);
+    for (const c of v.controls || []) if (c.rk && (!rep[c.rk] || worth(c) > worth(rep[c.rk]))) rep[c.rk] = c;
+    const controls = (v.controls || []).filter(c => !c.rk || rep[c.rk] === c).map(c => controlOut(c, page, idOf, c.tw && pressed[c.tw]));
+    const form = controls.some(c => FIELD_ROLE.test(c.role)) && controls.some(c => c.commit);
+    return {
+      id: v.id, key: v.key, url: v.url, kind: v.kind, parent: parentId, opener: v.opener,
+      title: v.title, headings: v.headings, facts: v.facts && v.facts.length ? v.facts : undefined,
+      form: form || undefined,
+      controls,
+    };
+  }
+
   /** The stored map: what guides and answers are written from. */
   function toMap(s) {
     const all = (s && s.views) || {};
@@ -1195,19 +1790,7 @@
     const idOf = k => (k && all[k] && all[k].captured ? all[k].id : undefined);
     return {
       origin: s.origin, learnedAt: new Date().toISOString(), status: s.status, probes: s.probes,
-      views: views.map(v => {
-        const page = v.kind === 'page' ? v : all[v.parent] || v;
-        return {
-          id: v.id, key: v.key, url: v.url, kind: v.kind, parent: v.parent && all[v.parent] ? all[v.parent].id : undefined, opener: v.opener,
-          title: v.title, headings: v.headings, facts: v.facts && v.facts.length ? v.facts : undefined,
-          controls: (v.controls || []).map(c => ({
-            ref: c.ref, role: c.role, name: c.name, section: c.section, state: c.state, options: c.options,
-            // Which screen the control lives on, so a guide can say «Перейдите на страницу …».
-            d: c.d ? { ...c.d, view: page.title } : c.d,
-            to: idOf(c.to),
-          })),
-        };
-      }),
+      views: views.map(v => viewOut(v, v.kind === 'page' ? v : all[v.parent] || v, idOf, v.parent && all[v.parent] ? all[v.parent].id : undefined)),
     };
   }
 
@@ -1225,11 +1808,17 @@
       v: 2, status: 'running', stopping: false, origin: location.origin, startedAt: Date.now(),
       views: {}, hot: [], queue: [], cur: null, probes: 0, pending: null, nav: null,
       n: { ids: 0, pages: 0, extra: 0 }, shapes: {}, redirects: {},
+      // netBlocked: what the host said at start (kept for resumes); commits: role|name|section of controls seen
+      // writing; seen: global header controls already pressed (→ the view key they opened, or null).
+      netBlocked: o.netBlocked === true, forms: false, commits: {}, seen: {},
     };
     const first = addView(pageKey(), cleanUrl(location.href), 'page', undefined, true, false);
     if (first) first.start = true;
-    // Nothing is pressed before the page-world guard has landed (or 1.5 s went by).
-    st.guardMain = await guardOn();
+    // Nothing is pressed before the page-world guard has landed (or 2.5 s went by).
+    const gd = await guardOn();
+    st.guardMain = gd.ok;
+    formsOn = st.forms = formsAllowed(o, gd.confirmed, st.netBlocked);
+    fenceOn();
     if (g !== gen) { if (looping === g) looping = 0; return false; }
     await save();
     progress('Начинаю');
@@ -1255,6 +1844,7 @@
     opts = o; st = s;
     st.n = st.n || { ids: Object.keys(st.views).length, pages: 0, extra: 0 };
     st.hot = st.hot || []; st.queue = st.queue || []; st.shapes = st.shapes || {}; st.redirects = st.redirects || {};
+    st.commits = st.commits || {}; st.seen = st.seen || {};
     // Origin lock: the press led off-site (OAuth, checkout) or the user went elsewhere. Leave the tab alone:
     // no navigating back, and no onDone (the map belongs to the other origin); onAbort tells the app.
     if (location.origin !== st.origin) {
@@ -1271,7 +1861,11 @@
     // «Остановить» was pressed while a page was loading: finish instead of walking on.
     if (st.stopping || stopping) { quit(); await finish('stopped'); return false; }
     // A new document: the page-world patch has to land again before the first press.
-    st.guardMain = await guardOn();
+    const gd = await guardOn();
+    st.guardMain = gd.ok;
+    // Form openers again only if writes are still blocked below the page (opts first, else what start was told).
+    formsOn = st.forms = formsAllowed(o, gd.confirmed, st.netBlocked);
+    fenceOn();
     if (g !== gen) return quit(false);
     await settle();
     if (g !== gen) return quit(false);
@@ -1315,7 +1909,12 @@
 
   const running = () => !!st && st.status === 'running' && !stopping && !st.stopping;
 
-  S.explore = { start, resume, stop, toMap, running, pageKey, pressable: el => !!pressKind(el), isDangerous: el => danger(el) };
+  S.explore = { start, resume, stop, toMap, snapshot, running, pageKey, pressable: el => !!pressKind(el), isDangerous: el => danger(el), forms: () => formsOn };
   // Pure helpers for dev/explore-safety-test.mjs (no DOM needed except for the element-level ones).
-  S._exploreTest = { isDangerText, isDangerAddress, linkTextDanger, dnorm, fwAttr, fwCheck, pressKind, closerIn, dialogQuestion, factOk, factsOf, toMap };
+  S._exploreTest = {
+    isDangerText, isDangerAddress, linkTextDanger, dnorm, fwAttr, fwCheck, pressKind, closerIn, dialogQuestion, factOk, factsOf, toMap,
+    formVerb, maskForm, commitOf, openerLike, fieldScope, formsAllowed, formRoute, unsafeAddress, regionsIn, viewOut,
+    // Sets the form-opener switch the way start() would: setForms({ netBlocked: true }) or setForms({ sdk: true, forms: true }, true).
+    setForms: (o, guardOk, savedNet) => { formsOn = formsAllowed(o, guardOk, savedNet); return formsOn; },
+  };
 })(typeof window !== 'undefined' ? window : globalThis);
