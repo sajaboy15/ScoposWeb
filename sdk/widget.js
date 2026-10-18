@@ -58,15 +58,16 @@
   };
   const newRun = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-  const playbooksReady = cfg.playbooksUrl ? fetch(cfg.playbooksUrl).then(r => (r.ok ? r.json() : [])).then(list => { if (Array.isArray(list)) playbooks = list; }).catch(() => {}) : Promise.resolve();
+  const playbooksReady = cfg.playbooksUrl ? fetch(cfg.playbooksUrl).then(r => (r.ok ? r.json() : [])).then(list => { if (Array.isArray(list)) { playbooks = list; instantDirty(); } }).catch(() => {}) : Promise.resolve();
 
   // Guides the explorer and Claude wrote for this product (see learn mode below).
-  let learned = null; // { summary, guides, views, learnedAt }
+  let learned = null; // { summary, guides, faq, views, learnedAt }
   const addLearned = k => {
     learned = k && k.guides && k.guides.length ? k : null;
     if (!learned) return;
     const ids = new Set(learned.guides.map(g => g.id));
     playbooks = [...learned.guides, ...playbooks.filter(p => !ids.has(p.id))];
+    instantDirty();
   };
   const knowledgeReady = fetch(cfg.endpoint + '/knowledge').then(r => (r.ok ? r.json() : null)).then(k => { addLearned(k); render(); }).catch(() => {});
 
@@ -123,7 +124,7 @@
   const needLearn = () => (S.explore ? Promise.resolve() : ldr && ldr.learn ? ldr.load(ldr.learn) : Promise.reject(new Error('Код режима изучения не загружен.')));
   let learning = null; // { status: 'confirm'|'exploring'|'writing'|'done'|'error', ... }
   let learnTimer = 0;
-  const LEARN_MS = 180e3;
+  const LEARN_MS = 12 * 60e3; // a deep learn writes its parts ~3 at a time: a few minutes for a big product
   const learnOpts = {
     store: exploreStore,
     onProgress: p => { learning = { status: 'exploring', ...p }; render(); },
@@ -145,7 +146,7 @@
       try {
         const out = await post('/learn', { map, product: cfg.product }, { headers: learnHeaders(), signal: ctl.signal });
         addLearned(out);
-        learning = { status: 'done', views: map.views.length, probes: map.probes, guides: (out.guides || []).length, summary: out.summary };
+        learning = { status: 'done', views: map.views.length, probes: map.probes, guides: (out.guides || []).length, faq: (out.faq || []).length, summary: out.summary };
       } catch (e) {
         const late = ctl.signal.aborted && ctl.signal.reason && ctl.signal.reason.name === 'TimeoutError';
         learning = { status: 'error', error: late ? 'Сервер не ответил за 3 минуты: гайды не написаны. Попробуйте изучить ещё раз.' : (e && e.message) || 'Не получилось' };
@@ -269,11 +270,11 @@ input:focus-visible { outline: none; }
     }
     if (L.status === 'writing') {
       const s = Math.round((Date.now() - (L.startedAt || Date.now())) / 1000);
-      return waiting(`learn:${L.startedAt}`, `Изучил ${L.views} экранов и окон. Claude пишет гайды${s > 2 ? ` · ${s} с` : '…'}`, '', '<p class="note">Обычно это минута-две.</p>');
+      return waiting(`learn:${L.startedAt}`, `Изучил ${L.views} экранов и окон. Claude пишет гайды и вопросы к ним${s > 2 ? ` · ${s} с` : '…'}`, '', '<p class="note">Обычно две-четыре минуты. Потом почти любой вопрос отвечается мгновенно.</p>');
     }
     if (L.status === 'error') return `<div class="err">${esc(L.error)}</div><div class="row">${cfg.learn ? '<button class="btn main" data-do="learn-again">Изучить заново</button>' : ''}<button class="btn" data-do="learn-cancel">Закрыть</button></div>`;
     return `<p class="a">Изучил продукт: ${L.views} экранов и окон, ${L.probes || 0} проверенных кнопок.</p><p class="hi">${esc(L.summary || '')}</p>
-      <div class="q">Готовые гайды · ${L.guides || 0}</div><div class="chips">${playbooks.filter(p => p.learned).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>`;
+      <div class="q">Готовые гайды · ${L.guides || 0}${L.faq ? ` · ${L.faq} вопросов отвечаются мгновенно` : ''}</div><div class="chips">${playbooks.filter(p => p.learned).map(p => `<button class="chip" data-pb="${esc(p.id)}">${esc(p.name)}</button>`).join('')}</div>`;
   }
 
   // Progress lines arrive 4×/s and the learn timer ticks every second: write only what changed.
@@ -321,10 +322,12 @@ input:focus-visible { outline: none; }
     }
     const idx = state.index || 0, done = state.status === 'done';
     const tag = state.source === 'playbook' ? '<span class="fast">Готовый гайд · мгновенно</span>'
+      : state.source === 'faq' ? '<span class="fast">Готовый ответ · мгновенно</span>'
       : state.source === 'cache' ? '<span class="fast">мгновенно · из кэша</span>'
       : state.source === 'map' ? 'Claude · по карте продукта' : 'Ответ Claude';
     setBody(`<div class="q">${esc(state.question)}</div>${state.answer ? `<p class="a">${esc(state.answer)}</p>` : ''}
       ${state.steps.length ? `<ol>${state.steps.map((s, i) => `<li class="${i < idx || done ? 'done' : i === idx ? 'cur' : ''}"><i>${i + 1}</i><span>${esc(s.instruction)}</span></li>`).join('')}</ol>` : ''}
+      ${state.show && !state.steps.length ? `<div class="chips"><button class="chip" data-pb="${esc(state.show.id)}">Показать на экране: ${esc(state.show.name)}</button></div>` : ''}
       <div class="meta">${tag}${done ? ' · готово' : ''}</div>
       ${done || !state.steps.length ? '<div class="row"><button class="btn" data-do="reset">Новый вопрос</button></div>' : ''}`);
   }
@@ -348,29 +351,492 @@ input:focus-visible { outline: none; }
   });
   root.querySelector('form').addEventListener('submit', e => { e.preventDefault(); const t = input.value.trim(); if (t) { input.value = ''; ask(t); } });
 
-  // ---------- local intent matcher: a question that names a guide runs it with 0 tokens ----------
-  const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
-  const STOP = new Set(['как', 'где', 'мне', 'можно', 'сделать', 'это', 'хочу', 'нужно', 'надо', 'что', 'чтобы', 'свой', 'свою', 'мой', 'мою', 'пожалуйста', 'how', 'the', 'can', 'where', 'what', 'and', 'want', 'need']);
-  const ACTION = ['отмен', 'удал', 'измен', 'выключ', 'отключ', 'убра', 'убер', 'смен', 'помен', 'cancel', 'delet', 'remov', 'edit', 'chang', 'disabl', 'turn off'];
-  const stems = s => norm(s).split(' ').filter(x => x.length > 2 && !STOP.has(x))
-    .map(x => { let y = x; for (let i = 0; i < 2 && y.length > 4 && /[аеиоуыэюяйь]$/.test(y); i++) y = y.slice(0, -1); return y.slice(0, 6); });
-  const same = (a, b) => a === b || (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a)));
-  const coverage = (from, to) => (from.length ? from.filter(x => to.some(t => same(x, t))).length / from.length : 0);
-  const actions = s => { const n = ' ' + norm(s) + ' '; return new Set(ACTION.filter(a => n.includes(' ' + a))); };
-  function matchGuides(question) {
-    const q = stems(question), qa = actions(question);
-    const scored = [];
-    for (const pb of playbooks) {
-      const n = stems(pb.name);
-      if (!n.length || !q.length) continue;
-      const toQ = coverage(n, q), toN = coverage(q, n), na = actions(pb.name);
-      const clash = [...qa].some(a => !na.has(a)) || [...na].some(a => !qa.has(a));
-      scored.push({ pb, score: (toQ + toN) / 2, sure: toQ >= 0.75 && toN >= 0.6 && !clash });
+  // ---------- instant answers: guides, their FAQ phrasings and facts matched locally, 0 tokens ----------
+  // The block below is the same code as in extension/core/brain.js (dev/instant-selftest.mjs checks they match).
+  // ==== instant answers: begin ====
+  /*
+   * Instant answers: a question matched locally against the guides' names, their FAQ phrasings and the learned
+   * facts, before any Claude call (0 tokens, about a millisecond). This block is copied verbatim into sdk/widget.js
+   * (the SDK does not load brain.js); dev/instant-selftest.mjs fails when the two copies differ.
+   *
+   *   const ix = Instant.index({ guides, faq, product });   // once per knowledge
+   *   Instant.match(ix, question) ->
+   *     { kind: 'guide', guide, steps, score }   sure: run it (steps carry the values the question gives)
+   *     { kind: 'fact', answer, show, score }    a fact from the map; show = a guide that opens its screen, or null
+   *     { kind: 'suggest', suggest: [guide] }    unsure: up to 3 guides to offer
+   *     { kind: 'none', suggest: [] }            nothing close: ask Claude
+   * faq: [{ q, guide: id | null, answer: string | null, fact?: key }]: a phrasing of a guide (answer null), or of a
+   * fact (answer set; entries with the same fact key are one fact; the answer in the question's language wins).
+   * Precision over recall: a guide runs only when one guide explains every word of the question (its phrasings, the
+   * synonyms learned from them, the fields it fills), no other plausible guide comes close, and no action word
+   * clashes (add vs delete, edit vs create...).
+   */
+  const Instant = (() => {
+    const low = s => String(s == null ? '' : s).toLowerCase().replace(/ё/g, 'е');
+    const CYR = /[а-я]/;
+    const STOP = new Set(('a an the to of for in on at by with from into onto about as and or but not no is are was were be been being am ' +
+      'do does did done can could would should will shall may might must i we you he she they it me us him her them my our your his ' +
+      'their its this that these those there here what which who whom whose where when why how please want wanna need needs like ' +
+      'let lets just also some any all every each one have has had get got go going make sure way thing things right now currently ' +
+      'today then than so if up out over again ok okay hi hello thanks take bring tell know help hey still yet already really actually ' +
+      'как где когда куда откуда почему зачем что чтобы кто какой какая какое какие каком какую какого сколько ли ' +
+      'мне меня мой моя мое мои мою моего мы нас нам наш наша наше наши нашу нашего нашей вы вам вас ваш ваша ваши я ты ' +
+      'он она оно они его ее их им свой своя свое свои свою своего этот эта это эти этого этой тот та то те там тут здесь ' +
+      'в во на по с со к ко от до из за для о об про при у над под без через и или а но не ни же бы ну вот ' +
+      'можно нужно надо хочу хотим хотел хотела могу может можем пожалуйста сделать делать сделай есть быть было будет ' +
+      'сейчас теперь сегодня уже еще тоже также просто привет спасибо').split(' '));
+    const MONTH = /^(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december)$|^(январ|феврал|апрел|сентябр|октябр|ноябр|декабр)|^(март|мая|май|июн|июл|август)[аеяь]?$/;
+    const MONEY = /^(dollars?|usd|eur|euros?|rub|руб\S*|доллар\S*|евро|тенге)$/;
+    // Action words, by class. A question with a class the guide lacks never runs it; a guide that deletes, cancels or
+    // turns something off never runs for a question without that word. 'view' only explains a word, it never clashes.
+    const ACTS = [
+      ['delete', /^(delet|remov|eras|удал|убра|убер|стере|стир)/],
+      ['cancel', /^(cancel|void|annul|отмен|аннул)/],
+      ['off', /^(disabl|deactiv|выключ|отключ|деактив)/],
+      ['on', /^(enabl|activat|включ|активир)/],
+      ['change', /^(chang|edit|updat|modif|renam|switch|replac|измен|смен|помен|редакт|обнов|переимен|исправ|поправ|замен|переключ)/],
+      ['create', /^(add|adds|added|adding|new|newly|нов)$|^(creat|regist|добав|созд|нов[аыоуе]|завед|выстав|оформ)/],
+    ];
+    const VIEW = /^(show|view|see|look|open|display|list|покаж|показ|посмотр|смотр|открой|откр|глян|список)/;
+    const HARD = new Set(['delete', 'cancel', 'off']);
+    const actOf = w => { for (const [k, re] of ACTS) if (re.test(w)) return k; return VIEW.test(w) ? 'view' : null; };
+    const WORD = /[$€₽#]?[\p{L}\p{N}](?:[\p{L}\p{N}@.,:/+'’_-]*[\p{L}\p{N}])?/gu;
+    const EN_SUF = [['ations', ''], ['ation', ''], ['ments', ''], ['ment', ''], ['ings', ''], ['ing', ''], ['ies', 'y'], ['ied', 'y'], ['ers', ''], ['er', ''], ['ed', ''], ['es', ''], ['ly', ''], ['s', '']];
+    const RU_SUF = ['иями', 'ями', 'ами', 'ией', 'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ость', 'ости', 'ться', 'тся', 'ешь', 'ете', 'ите', 'ает', 'яет', 'ует', 'ала', 'ила', 'ыла', 'ать', 'ять', 'ить', 'еть', 'уть', 'ой', 'ей', 'ий', 'ый', 'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'ую', 'юю', 'ом', 'ем', 'ам', 'ям', 'ах', 'ях', 'ов', 'ев', 'ия', 'ья', 'ии', 'ью', 'а', 'я', 'о', 'е', 'и', 'ы', 'у', 'ю', 'ь', 'й'].sort((a, b) => b.length - a.length);
+    // Words repeat a lot (labels, "Click", the product's nouns): each is stemmed once.
+    const STEMS = new Map();
+    function stem(w) {
+      let v = STEMS.get(w);
+      if (v === undefined) {
+        if (STEMS.size > 50000) STEMS.clear();
+        v = stem0(w);
+        STEMS.set(w, v);
+      }
+      return v;
     }
-    scored.sort((a, b) => b.score - a.score);
-    if (scored[0] && scored[0].sure) return { run: scored[0].pb, suggest: [] };
-    return { run: null, suggest: scored.filter(s => s.score >= 0.4 || s.sure).slice(0, 3).map(s => s.pb) };
-  }
+    function stem0(w) {
+      if (CYR.test(w)) {
+        for (const s of RU_SUF) if (w.length - s.length >= 3 && w.endsWith(s)) { w = w.slice(0, -s.length); break; }
+        return w.slice(0, 7);
+      }
+      w = w.replace(/['’]s?$/, '');
+      if (w.length > 3) {
+        for (const [s, r] of EN_SUF) if (w.length - s.length >= 3 && w.endsWith(s)) { w = w.slice(0, -s.length) + r; break; }
+        if (w.length > 3 && w.endsWith('e')) w = w.slice(0, -1);
+      }
+      return w.slice(0, 7);
+    }
+    // Stems match exactly, or one is the other plus at most two letters (груз ≠ грузовик, помен = поменя).
+    const same = (a, b) => a === b || (a.length >= 4 && b.length >= 4 && Math.abs(a.length - b.length) <= 2 && (a.startsWith(b) || b.startsWith(a)));
+
+    /** Words of a text: { raw, w (lower), s (stem), n, at, end, cap, num (a value-looking word: digits, @, $), q (in quotes) }. */
+    function words(text) {
+      const src = String(text == null ? '' : text).slice(0, 600);
+      const quoted = [];
+      src.replace(/[«"“]([^»"”]{1,80})[»"”]/g, (m, inner, at) => { quoted.push([at, at + m.length]); return m; });
+      const out = [];
+      WORD.lastIndex = 0;
+      for (let m; (m = WORD.exec(src));) {
+        const raw = m[0], at = m.index, w = low(raw), num = /[\d@$€₽#]/.test(raw);
+        out.push({ raw, w, s: num ? '' : stem(w), n: out.length, at, end: at + raw.length, cap: /^\p{Lu}/u.test(raw), num, q: quoted.some(([a, b]) => at > a && at < b) });
+      }
+      return out;
+    }
+    // Stems of the letter parts of a word ("driver's" → driv, "a/r" → nothing: too short).
+    const partsOf = (x, drop) => (x.num ? [] : x.w.split(/[^\p{L}]+/u).filter(p => p.length >= 2 && !STOP.has(p) && !(drop && drop.has(p))));
+    function toks(text, drop) {
+      const out = [];
+      for (const x of words(text)) for (const p of partsOf(x, drop)) { const s = stem(p); if (!out.includes(s)) out.push(s); }
+      return out;
+    }
+    function actsOf(list, withView) {
+      const out = new Set();
+      const text = ' ' + list.map(x => x.w).join(' ') + ' ';
+      for (const x of list) { const k = actOf(x.w); if (k && (k !== 'view' || withView)) out.add(k); }
+      if (/ turn(ing|s)? off /.test(text) || / switch(ing|es)? off /.test(text)) out.add('off');
+      if (/ turn(ing|s)? on /.test(text) || / switch(ing|es)? on /.test(text)) out.add('on');
+      return out;
+    }
+    // An option's own words: "Unit 105 · Peterbilt 579" → "Unit 105"; placeholders ("Select a driver") are no option.
+    const head = o => String(o || '').split(/\s[·—–|]\s|\s-\s/)[0].replace(/\([^)]*\)/g, ' ').trim();
+    const placeholder = o => /^(select|choose|pick|any|all|none|—|-|выберите|выбрать|любой|все|нет)\b/i.test(String(o || '').trim());
+    const OPTS = new WeakMap();
+    // A select step's options with their words, worked out once per step.
+    function optWords(step) {
+      if (!step || typeof step !== 'object') return [];
+      let v = OPTS.get(step);
+      if (!v) {
+        v = (Array.isArray(step.options) ? step.options : []).filter(o => typeof o === 'string' && !placeholder(o))
+          .map(o => ({ o, hw: words(head(o)).filter(x => x.num || !STOP.has(x.w)) })).filter(x => x.hw.length);
+        OPTS.set(step, v);
+      }
+      return v;
+    }
+
+    // ---- values ----
+    // The same normalisation as Brain.norm, so a value checks the same everywhere.
+    const vnorm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[«»"'“”.,:;!?()]/g, ' ').replace(/\s+/g, ' ').trim();
+    /**
+     * A proposed value is kept only if the user actually said it (it appears in the question) or, for a select, it
+     * is one of the control's real options. Page text can't plant values.
+     */
+    function safeValue(value, question, options) {
+      if (value == null || value === '') return null;
+      const v = String(value).slice(0, 200);
+      if (options && options.length) {
+        const hit = options.find(o => vnorm(o) === vnorm(v)) || options.find(o => vnorm(o).includes(vnorm(v)) && vnorm(v).length > 2);
+        if (hit) return hit;
+      }
+      const q = vnorm(question), nv = vnorm(v);
+      if (nv && q.includes(nv)) return v;
+      // Numbers the user typed, possibly reformatted ("50 000" vs "50000").
+      const digits = nv.replace(/\D/g, '');
+      if (digits.length >= 2 && q.replace(/\D/g, '').includes(digits)) return v;
+      return null;
+    }
+    const DATE = /\d{1,4}[./-]\d{1,2}[./-]\d{1,4}/;
+    const NUMBER = /^[$€₽]?\d[\d.,\s]*$/;
+    /** The option of a select step the question names: { option, used: Set of word indexes } or null (none, or a tie). */
+    function optionIn(step, qw, block) {
+      let best = null, tie = false;
+      for (const { o, hw } of optWords(step)) {
+        const used = new Set();
+        const ok = hw.every(h => {
+          const at = qw.findIndex(x => !used.has(x.n) && !(block && block.has(x.n)) && (h.num ? x.w === h.w : !x.num && same(x.s, h.s)));
+          if (at < 0) return false;
+          used.add(qw[at].n);
+          return true;
+        });
+        if (!ok) continue;
+        if (!best || hw.length > best.size) { best = { option: o, used, size: hw.length }; tie = false; } else if (hw.length === best.size && o !== best.option) tie = true;
+      }
+      return best && !tie ? best : null;
+    }
+    /**
+     * Steps with the values the question gives: the option of a select the question names, and for a text field the
+     * value next to its label ("phone 555-0142", "rate $2,800", "120 gallons"). Only what safeValue confirms; dates are
+     * left to the user (a date field may want another format, and a step waits for its value). The guide is not changed.
+     */
+    function fill(steps, question) {
+      const qw = words(question);
+      const src = Array.isArray(steps) ? steps : [];
+      const out = src.map(s => ({ ...s }));
+      const used = new Set();
+      out.forEach((s, i) => {
+        if (s.action !== 'select') return;
+        const hit = optionIn(src[i], qw, used);
+        if (!hit) return;
+        const v = safeValue(hit.option, question, s.options);
+        if (v) { s.value = v; hit.used.forEach(n => used.add(n)); }
+      });
+      const fields = out.filter(s => s.action === 'type' && !s.value && s.target && s.target.text)
+        .map(s => ({ s, stems: toks(String(s.target.text).replace(/[*()]/g, ' ')) }));
+      const labels = fields.flatMap(f => f.stems);
+      // Value spans: runs of value-looking words (digits, $, @, or capitalised mid-sentence words that are no label).
+      const isVal = x => x.num || x.q || (x.cap && x.n > 0 && !STOP.has(x.w) && !labels.some(t => same(t, x.s)));
+      const spans = [];
+      for (let i = 0; i < qw.length; i++) {
+        if (used.has(qw[i].n) || !isVal(qw[i])) continue;
+        let j = i;
+        while (j + 1 < qw.length && isVal(qw[j + 1]) && !used.has(qw[j + 1].n) && !/[,;]/.test(String(question).slice(qw[j].end, qw[j + 1].at))) j++;
+        spans.push({ from: i, to: j, text: String(question).slice(qw[i].at, qw[j].end) });
+        i = j;
+      }
+      const count = {};
+      fields.forEach(f => f.stems.forEach(t => { count[t] = (count[t] || 0) + 1; }));
+      const taken = new Set();
+      const anchorOf = (f, uniqueOnly) => {
+        for (let i = 0; i < qw.length; i++) {
+          if (qw[i].num || used.has(qw[i].n)) continue;
+          if (f.stems.some(t => same(t, qw[i].s) && (!uniqueOnly || count[t] === 1))) return i;
+        }
+        return -1;
+      };
+      for (const uniqueOnly of [true, false]) {
+        for (const f of fields) {
+          if (f.s.value) continue;
+          const a = anchorOf(f, uniqueOnly);
+          if (a < 0) continue;
+          // A number right before the label ("120 gallons"), else the first value within six words after it.
+          const sp = spans.find(x => !taken.has(x) && x.to === a - 1 && NUMBER.test(x.text)) || spans.find(x => !taken.has(x) && x.from > a && x.from <= a + 6);
+          if (!sp || DATE.test(sp.text) || words(sp.text).some(x => MONTH.test(x.w))) continue;
+          const v = safeValue(sp.text.replace(/^[«"“]|[»"”]$/g, ''), question, null);
+          if (v) { f.s.value = v; taken.add(sp); }
+        }
+      }
+      return out;
+    }
+
+    // ---- the index ----
+    function index({ guides = [], faq = [], product = '' } = {}) {
+      const t0 = Date.now();
+      const prod = new Set(words(String(product || '').split(/[,—–:(|]/)[0]).map(x => x.w).filter(w => w.length >= 3));
+      const T = [], byId = new Map();
+      for (const g of Array.isArray(guides) ? guides : []) {
+        if (!g || g.id == null || typeof g.name !== 'string' || !g.name.trim() || !Array.isArray(g.steps) || !g.steps.length || byId.has(String(g.id))) continue;
+        const t = { kind: 'guide', guide: g, texts: [g.name], field: [], labels: [] };
+        for (const s of g.steps) {
+          if (!s) continue;
+          if (s.target && typeof s.target.text === 'string') { t.field.push(s.target.text); t.labels.push(s.target.text); }
+          if (typeof s.instruction === 'string') t.field.push(s.instruction);
+          if (s.action === 'select') optWords(s).forEach(x => { t.field.push(head(x.o)); t.labels.push(head(x.o)); });
+        }
+        byId.set(String(g.id), t);
+        T.push(t);
+      }
+      const facts = new Map();
+      for (const f of Array.isArray(faq) ? faq : []) {
+        if (!f || typeof f.q !== 'string' || !f.q.trim()) continue;
+        const q = f.q.slice(0, 200);
+        if (typeof f.answer === 'string' && f.answer.trim()) {
+          const k = f.fact != null ? 'f:' + f.fact : 'a:' + f.answer;
+          let t = facts.get(k);
+          if (!t) { t = { kind: 'fact', texts: [], field: [], labels: [], answers: {}, show: null }; facts.set(k, t); T.push(t); }
+          if (t.texts.length < 12) t.texts.push(q);
+          const lang = CYR.test(low(q)) ? 'ru' : 'xx';
+          if (!t.answers[lang]) t.answers[lang] = f.answer.slice(0, 400);
+          if (!t.answers.ru && typeof f.answer_ru === 'string' && f.answer_ru.trim()) t.answers.ru = f.answer_ru.slice(0, 400);
+          if (!t.show && f.guide != null && byId.has(String(f.guide))) t.show = byId.get(String(f.guide)).guide;
+        } else if (f.guide != null && byId.has(String(f.guide))) {
+          const t = byId.get(String(f.guide));
+          if (t.texts.length < 12) t.texts.push(q);
+        }
+      }
+      const N = T.length, df = new Map(), core = new Map(), field = new Map();
+      // The same texts come back often ("Click «Drivers» in the main navigation"): tokenised once per index.
+      const tkm = new Map();
+      const tk = x => { let v = tkm.get(x); if (!v) { v = toks(x, prod); tkm.set(x, v); } return v; };
+      const push = (m, k, i) => { const a = m.get(k); if (!a) m.set(k, [i]); else if (a[a.length - 1] !== i) a.push(i); };
+      const lab = s => low((s.target && s.target.text) || s.instruction || '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+      T.forEach((t, i) => {
+        t.i = i;
+        const ws = t.texts.map(x => words(x));
+        t.name = tk(t.texts[0]);
+        t.phrases = t.texts.map(tk).filter(p => p.length);
+        const all = new Set(t.phrases.flat());
+        all.forEach(s => { df.set(s, (df.get(s) || 0) + 1); push(core, s, i); });
+        const fs = new Set();
+        for (const x of t.field) for (const s of tk(x)) if (!all.has(s)) fs.add(s);
+        fs.forEach(s => push(field, s, i));
+        // Labels of the controls it touches, as stems: a question that names one whole ("phone", "dry van", "USDOT
+        // number") is talking about this guide's form.
+        t.labelStems = t.labels.map(x => tk(String(x).replace(/[*()]/g, ' '))).filter(l => l.length && l.length <= 4);
+        t.acts = new Set(ws.flatMap(w => [...actsOf(w, true)]));
+        t.nameActs = actsOf(ws[0]);
+        t.hard = t.kind === 'guide' ? new Set([...t.nameActs].filter(k => HARD.has(k))) : new Set();
+        if (t.kind === 'guide') {
+          // What the guide ends on and which fields it fills: two guides alike in both are the same task.
+          const st = t.guide.steps.filter(s => s && s.action !== 'look');
+          t.end = st.length ? st[st.length - 1].action + ':' + lab(st[st.length - 1]) : '';
+          t.fields = new Set(st.filter(s => s.action === 'type' || s.action === 'select').map(lab));
+          t.live = t.guide.live ? 1 : 0;
+        }
+      });
+      const idf = s => Math.log((N + 1) / ((df.get(s) || 0) + 0.5));
+      T.forEach(t => { t.pw = t.phrases.map(p => p.map(idf)); t.pws = t.pw.map(a => a.reduce((x, y) => x + y, 0) || 1); });
+      // Synonyms learned from the FAQ: a phrasing that differs from its guide's name by a word or two pairs those
+      // words ("bill" ~ "invoice", "водител" ~ "driver"); a pair counts when it holds for two or more guides.
+      const one = new Map(), pair = new Map();
+      const inc = (m, k) => m.set(k, (m.get(k) || 0) + 1);
+      // Action words are left out: their classes already match across languages.
+      const plain = list => list.filter(s => !actOf(s));
+      for (const t of T) {
+        const name = plain(t.name);
+        if (t.kind !== 'guide' || !name.length) continue;
+        const A = new Set(), B = new Set(), P = new Set();
+        for (const p0 of t.phrases.slice(1)) {
+          const p = plain(p0);
+          const ua = p.filter(s => !name.some(n => same(n, s)));
+          const ub = name.filter(n => !p.some(s => same(n, s)));
+          if (!ua.length || !ub.length || ua.length > 2 || ub.length > 2) continue;
+          ua.forEach(a => { A.add(a); ub.forEach(b => P.add(a + '|' + b)); });
+          ub.forEach(b => B.add(b));
+        }
+        A.forEach(a => inc(one, 'a' + a)); B.forEach(b => inc(one, 'b' + b)); P.forEach(k => inc(pair, k));
+      }
+      const syn = new Map();
+      const addSyn = (a, b) => { if (!syn.has(a)) syn.set(a, new Set()); syn.get(a).add(b); };
+      for (const [k, n] of pair) {
+        const [a, b] = k.split('|');
+        if (a !== b && n >= 2 && n >= 0.5 * Math.min(one.get('a' + a), one.get('b' + b))) { addSyn(a, b); addSyn(b, a); }
+      }
+      return { T, N, df, core, field, syn, prod, vocab: [...new Set([...core.keys(), ...field.keys()])], guides: T.filter(t => t.kind === 'guide').length, facts: facts.size, ms: Date.now() - t0 };
+    }
+
+    // ---- matching ----
+    const SURE = 0.7, EXPLAINED = 0.9, MARGIN = 0.1, SUGGEST = 0.45;
+    // A question about a value ("what plan are we on", «сколько счетов ждут оплаты»): a fact answers it. Anything else
+    // ("how do I…", a command) is a task: only guides compete.
+    const VALUE_Q = /^(what|whats|which|who|whose|when|is|are|was|were|do|does|did|have|has|how (many|much|long|big|often))\b|^(какой|какая|какое|какие|каков|какова|сколько|кто|когда|чей|чья|есть ли)(?![\p{L}])|(^|\s)ли(?![\p{L}])/u;
+    // Two guides that end on the same control and fill mostly the same fields are one answer (the same task from two
+    // screens); so is a guide that stops at the opener (live, no fields) and one that goes on through the form.
+    function equivalent(a, b) {
+      if (!a.end || a.end !== b.end) return false;
+      const x = a.fields, y = b.fields;
+      if (!x.size || !y.size) return (!x.size && !y.size) || (!x.size ? a.live : b.live) === 1;
+      let both = 0;
+      x.forEach(f => { if (y.has(f)) both++; });
+      return both / (x.size + y.size - both) >= 0.5;
+    }
+    function match(ix, question, debug) {
+      const none = { kind: 'none', suggest: [], score: 0, top: [] };
+      if (!ix || !ix.T || !ix.T.length) return none;
+      const qw = words(question);
+      const Q = [];
+      for (const x of qw) for (const p of partsOf(x, ix.prod)) {
+        const s = stem(p);
+        if (!Q.some(q => q.s === s)) Q.push({ s, w: p, x, act: actOf(p) });
+      }
+      for (const q of Q) {
+        q.M = new Set();
+        for (const v of ix.vocab) if (same(q.s, v)) q.M.add(v);
+        q.S = new Set();
+        q.M.forEach(v => (ix.syn.get(v) || []).forEach(s => { if (!q.M.has(s)) q.S.add(s); }));
+        q.core = new Set(); q.fld = new Set(); q.syn = new Set();
+        q.M.forEach(v => { (ix.core.get(v) || []).forEach(i => q.core.add(i)); (ix.field.get(v) || []).forEach(i => q.fld.add(i)); });
+        q.S.forEach(v => (ix.core.get(v) || []).forEach(i => q.syn.add(i)));
+        q.known = q.core.size > 0 || q.fld.size > 0 || q.syn.size > 0 || !!q.act;
+        q.idf = Math.log((ix.N + 1) / (q.core.size + 0.5));
+      }
+      // Values: numbers, quoted text, months and money, and capitalised words mid-sentence that nothing in the guides
+      // knows (a name like "Jake Morris" or "Summit Freight": a run of capitalised words goes together).
+      for (let i = 0; i < qw.length; i++) {
+        if (!(qw[i].cap && qw[i].n > 0)) continue;
+        let j = i;
+        while (j + 1 < qw.length && qw[j + 1].cap) j++;
+        const run = Q.filter(q => q.x.n >= i && q.x.n <= j);
+        if (run.some(q => !q.known)) run.forEach(q => { q.value = true; });
+        i = j;
+      }
+      for (const q of Q) if (q.x.q || (!q.known && (MONTH.test(q.w) || MONEY.test(q.w)))) q.value = true;
+      const C = Q.filter(q => !q.value).slice(0, 30);
+      if (!C.length) return none;
+      const sum = C.reduce((n, q) => n + q.idf, 0) || 1;
+      const QM = new Set(), QS = new Set();
+      C.forEach(q => { q.M.forEach(v => QM.add(v)); q.S.forEach(v => QS.add(v)); });
+      const valueQ = VALUE_Q.test(low(String(question)).trim());
+      const qActs = actsOf(qw);
+      // A field name counts for a guide only when it is a slot the user fills ("phone 555-0142", "120 gallons") or
+      // the whole label of one of its controls ("billing email", "dry van"): "address" alone is not "Street address".
+      const valAt = new Set(qw.filter(x => x.num).map(x => x.n));
+      Q.forEach(q => { if (q.value) valAt.add(q.x.n); });
+      C.forEach(q => { q.slot = valAt.has(q.x.n + 1) || valAt.has(q.x.n + 2) || (valAt.has(q.x.n - 1) && qw[q.x.n - 1].num); q.rare = q.core.size < 0.3 * ix.N; });
+      const labelled = (t, q) => t.labelStems && t.labelStems.some(l => l.some(s => q.M.has(s)) && l.every(s => QM.has(s)));
+      // Which question words each stem matches, as bits (direct, and through a learned synonym).
+      const bitM = new Map(), bitS = new Map();
+      C.forEach((q, k) => { q.M.forEach(v => bitM.set(v, (bitM.get(v) || 0) | (1 << k))); q.S.forEach(v => bitS.set(v, (bitS.get(v) || 0) | (1 << k))); });
+      const all = (1 << C.length) - 1;
+      // Targets that share a word or a synonym with the question (a field alone can't make a phrasing match), and
+      // could still explain enough of it: below R 0.29 even a perfect phrasing scores under SUGGEST.
+      const ub = new Float64Array(ix.N);
+      let anyAct = 0;
+      C.forEach(q => {
+        if (q.act) { anyAct += q.idf; return; }
+        q.core.forEach(i => { ub[i] += q.idf; });
+        q.syn.forEach(i => { if (!q.core.has(i)) ub[i] += 0.8 * q.idf; });
+        q.fld.forEach(i => { if (!q.core.has(i) && !q.syn.has(i)) ub[i] += q.idf; });
+      });
+      const cand = new Set();
+      C.forEach(q => { q.core.forEach(i => cand.add(i)); q.syn.forEach(i => cand.add(i)); });
+      const scored = [];
+      for (const i of cand) {
+        const t = ix.T[i];
+        if ((t.kind === 'fact' && !valueQ) || (ub[i] + anyAct) / sum < 0.29) continue;
+        // R: how much of the question this target explains (its phrasings, learned synonyms, its action words, a
+        // little its fields); C: how much of its best phrasing the question says. score = their harmonic mean.
+        let mAll = 0, sAll = 0, actMask = 0;
+        for (let k = 0; k < C.length; k++) if (C[k].act && t.acts.has(C[k].act)) actMask |= 1 << k;
+        let bestC = 0, exact = false;
+        for (let pi = 0; pi < t.phrases.length; pi++) {
+          const p = t.phrases[pi], pw = t.pw[pi];
+          let cov = 0, m = 0, s = 0;
+          for (let j = 0; j < p.length; j++) {
+            const a = bitM.get(p[j]), b = bitS.get(p[j]);
+            if (a) { cov += pw[j]; m |= a; } else if (b) { cov += 0.8 * pw[j]; s |= b; }
+          }
+          mAll |= m; sAll |= s;
+          const Cv = cov / t.pws[pi];
+          if (Cv > bestC) bestC = Cv;
+          if (Cv > 0.999 && ((m | actMask) & all) === all) exact = true;
+        }
+        let r = 0, expl = 0, missing = false;
+        for (let k = 0; k < C.length; k++) {
+          const q = C[k], bit = 1 << k, e = ((mAll | actMask) & bit) ? 1 : (sAll & bit) ? 0.8 : 0, f = e < 1 && q.fld.has(i);
+          // A field the user fills ("phone 555-0142") or names whole ("oil change") is as good as a phrasing word; any
+          // other mention of a field only a little.
+          const filled = f && (q.slot || labelled(t, q));
+          r += q.idf * (filled ? 1 : f ? Math.max(e, 0.4) : e);
+          // Every word of the question must be this target's (a slot or a control it names counts), except very common ones.
+          if (e > 0 || filled) expl += q.idf; else if (q.rare) missing = true;
+        }
+        const R = r / sum;
+        scored.push({ t, score: R + bestC > 0 ? (2 * R * bestC) / (R + bestC) : 0, R, explained: expl / sum, missing, exact });
+      }
+      scored.sort((a, b) => b.score - a.score || b.exact - a.exact);
+      // Action words, without the words a select option of the guide takes ("oil change" is a service type).
+      const clash = t => {
+        let qa = qActs;
+        if (t.kind === 'guide') {
+          const skip = new Set();
+          for (const s of t.guide.steps) if (s && s.action === 'select') { const h = optionIn(s, qw); if (h) h.used.forEach(n => skip.add(n)); }
+          if (skip.size) qa = actsOf(qw.filter(x => !skip.has(x.n)));
+        }
+        for (const k of qa) if (!t.acts.has(k) || (HARD.has(k) && !t.nameActs.has(k))) return true;
+        for (const k of t.hard) if (!qa.has(k)) return true;
+        return false;
+      };
+      // Two facts that tie and give the same numbers are one answer (the dashboard and the list both say "3 of 15").
+      const digits = t => (Object.values(t.answers).join(' ').match(/\d+/g) || []).sort().join(',');
+      const agree = (a, b) => a.t.kind === 'fact' && b.t.kind === 'fact' && !!digits(a.t) && digits(a.t) === digits(b.t);
+      const head12 = scored.slice(0, 12).map(s => ({ ...s, clash: clash(s.t) }));
+      const ok = head12.filter(s => !s.clash);
+      const unknown = C.filter(q => !q.known).reduce((n, q) => n + q.idf, 0) / sum;
+      // Plausible: explains the whole question. The best plausible one wins when no other plausible one is close, or
+      // when only it has a phrasing that is exactly the question, or when the close ones are the same task.
+      const plausible = s => s.score >= SURE && s.explained >= EXPLAINED && !s.missing;
+      const pick = pool => {
+        const P = pool.filter(plausible);
+        const b = P[0];
+        if (!b || unknown > 0.1) return null;
+        if (head12.some(s => s.clash && s.t.kind === b.t.kind && s.score > b.score && plausible(s))) return null;
+        // A rival whose name lacks the question's action word while b's name has it is no rival ("edit a load" vs
+        // "See a load's history").
+        const named = s => [...qActs].every(k => s.t.nameActs.has(k));
+        const rivals = P.slice(1).filter(s => b.score - s.score < MARGIN && !(named(b) && !named(s)));
+        if (!rivals.length) return b;
+        if (b.exact && rivals.every(s => !s.exact)) return b;
+        if (rivals.every(s => agree(b, s))) return b;
+        if (b.t.kind === 'guide' && rivals.every(s => equivalent(b.t, s.t))) return [b, ...rivals].sort((x, y) => (x.t.live - y.t.live) || (y.score - x.score))[0];
+        return null;
+      };
+      const top = ok.slice(0, 3).map(s => ({ name: s.t.kind === 'guide' ? s.t.guide.name : s.t.texts[0], kind: s.t.kind, score: +s.score.toFixed(3), R: +s.R.toFixed(3) }));
+      const dbg = debug ? { debug: head12.map(s => ({ name: s.t.kind === 'guide' ? s.t.guide.name : s.t.texts[0], kind: s.t.kind, score: +s.score.toFixed(3), R: +s.R.toFixed(3), explained: +s.explained.toFixed(2), missing: s.missing, exact: s.exact, clash: s.clash })), unknown: +unknown.toFixed(2), valueQ, C: C.map(q => q.s) } : {};
+      const facts = ok.filter(s => s.t.kind === 'fact'), guides = ok.filter(s => s.t.kind === 'guide');
+      const f = valueQ ? pick(facts) : null;
+      if (f) {
+        const a = f.t.answers;
+        return { kind: 'fact', answer: (CYR.test(low(question)) ? a.ru || a.xx : a.xx || a.ru) || '', show: f.t.show || null, score: f.score, top, ...dbg };
+      }
+      // A question about a value is not a task: only a guide that shows something may answer it (never one that
+      // creates or changes), and not when several facts answer it equally well.
+      const g = valueQ && facts.some(plausible) ? null : pick(valueQ ? guides.filter(s => !s.t.nameActs.size) : guides);
+      if (g) return { kind: 'guide', guide: g.t.guide, steps: fill(g.t.guide.steps, question), score: g.score, top, ...dbg };
+      const suggest = guides.filter(s => s.score >= SUGGEST).slice(0, 3).map(s => s.t.guide);
+      return { kind: suggest.length ? 'suggest' : 'none', suggest, score: ok[0] ? ok[0].score : 0, top, ...dbg };
+    }
+    return { index, match, fill, safeValue, words, stem };
+  })();
+  // ==== instant answers: end ====
+  const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();
+  // The index over every guide this page knows (learned + recorded) and the learned FAQ: built once, again only when
+  // the guides change.
+  let instant = null;
+  const instantIndex = () => instant || (instant = Instant.index({ guides: playbooks, faq: (learned && learned.faq) || [], product: cfg.product }));
+  const instantDirty = () => {
+    instant = null;
+    const idle = window.requestIdleCallback || (fn => setTimeout(fn, 200));
+    idle(() => { try { instantIndex(); } catch (e) { /* built on the first question instead */ } });
+  };
 
   // ---------- asking ----------
   function stopAsk() { if (current) { current.ctl.abort(); current = null; } progress = null; }
@@ -383,9 +849,15 @@ input:focus-visible { outline: none; }
     learning = null;
     const runId = newRun();
     if (!force) {
-      const m = matchGuides(question);
-      if (m.run) return runSteps(runId, question, `Сценарий «${m.run.name}»`, m.run.steps, 'playbook', !!m.run.live);
-      if (m.suggest.length) {
+      // 1. A learned guide, a FAQ phrasing or a fact answers it: instantly, 0 tokens, nothing sent anywhere.
+      let m = null;
+      try { m = Instant.match(instantIndex(), question); } catch (e) { m = null; }
+      if (m && m.kind === 'guide') return runSteps(runId, question, `Сценарий «${m.guide.name}»`, m.steps, 'playbook', !!m.guide.live);
+      if (m && m.kind === 'fact') {
+        remember(question, m.answer);
+        return runSteps(runId, question, m.answer, [], 'faq', false, m.show ? { id: m.show.id, name: m.show.name } : null);
+      }
+      if (m && m.suggest.length) {
         state = { runId, question, status: 'suggest', steps: [], suggestions: m.suggest.map(p => ({ id: p.id, name: p.name })) };
         save(); render(); setOpen(true); return;
       }
@@ -395,14 +867,16 @@ input:focus-visible { outline: none; }
     const clear = deadline(ctl, 75000);
     state = { runId, question, status: 'thinking', steps: [] }; save(); render();
     try {
-      const out = await post('', { question, page: scan(question), history: chat, product: cfg.product }, {
+      // force: the user turned the suggestions down, so the server does not answer from the guides either.
+      const out = await post('', { question, page: scan(question), history: chat, product: cfg.product, ...(force ? { force: true } : {}) }, {
         signal: ctl.signal,
         onProgress: p => { if (current && current.runId === runId) { progress = p; render(); } },
       });
       if (!state || state.runId !== runId) return; // asked again or cancelled meanwhile
       remember(question, out.answer);
       const steps = out.ready ? out.steps || [] : toSteps(out.steps || []);
-      runSteps(runId, question, out.answer, steps, out.source || (out.ready ? 'map' : 'claude'));
+      const show = out.show ? playbooks.find(p => p.id === out.show) : null;
+      runSteps(runId, question, out.answer, steps, out.source || (out.ready ? 'map' : 'claude'), !!out.live, show ? { id: show.id, name: show.name } : null);
     } catch (e) {
       if (!state || state.runId !== runId) return;
       if (ctl.signal.aborted) {
@@ -450,9 +924,10 @@ input:focus-visible { outline: none; }
 
   // live: the guide stops where the learned map stopped (a form the explorer did not open); at its end the
   // rest is planned once from the page the user is on.
-  function runSteps(runId, question, answer, steps, source, live = false) {
+  // show: for an answer with no steps (a fact), the guide that opens the screen it is on ({ id, name }), or null.
+  function runSteps(runId, question, answer, steps, source, live = false, show = null) {
     progress = null;
-    state = { runId, question, answer, steps, source, live: !!live, index: 0, status: steps.length ? 'running' : 'answered', replanned: [], heals: 0, mores: 0 };
+    state = { runId, question, answer, steps, source, live: !!live, show, index: 0, status: steps.length ? 'running' : 'answered', replanned: [], heals: 0, mores: 0 };
     save(); render();
     // Step aside so the page is visible; the pointer card carries the walkthrough from here.
     if (steps.length) { start(0); setTimeout(() => setOpen(false), 450); } else setOpen(true);

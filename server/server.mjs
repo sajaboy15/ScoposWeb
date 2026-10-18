@@ -3,9 +3,12 @@
 //   ANTHROPIC_API_KEY=sk-ant-... node server/server.mjs      -> http://localhost:4173
 //
 // Public (same-origin only, JSON only, rate-limited, daily budget):
-//   POST /api/scopos  { question, page, history }               -> { answer, steps, source }
+//   POST /api/scopos  { question, page, history, force? }       -> { answer, steps, source }
+//                     source 'playbook' / 'faq': answered from the learned guides and FAQ with no Claude call (also
+//                     without a key); force: true skips that (the user asked Claude on purpose)
 //                     { locate: { instruction, oldText }, page, candidates } -> { element_id }
-//   GET  /api/scopos/knowledge  learned guides for the widget; questions are then answered from the whole map
+//   GET  /api/scopos/knowledge  { learnedAt, summary, guides, faq, views } for the widget (ETag, gzip): it answers
+//                     from guides and FAQ locally; other questions are then answered from the whole map
 //   GET  /scopos.js   the SDK loader; GET /scopos-core.<hash>.js, /scopos-learn.<hash>.js its chunks (sdk/build.mjs:
 //                     built in memory from the sources, rebuilt when one changes, or read from dist/ where they are absent)
 //   GET  /            the demo app (Ledgerly)
@@ -15,7 +18,11 @@
 //   GET  /dev/*, /extension/sidepanel/*   dev pages, e.g. /dev/panel-preview.html (the side panel with a stubbed chrome API)
 //   GET  /setup       paste the Claude key in a browser instead of an env var (saved to .scopos-key.local)
 //   *    /api/key     key status, save, test, delete
-//   POST /api/scopos/learn   { map } from the explorer -> guides written by Claude
+//   POST /api/scopos/learn   { map, product?, docs? } from the explorer -> { summary, guides, faq, facts, views, ... }
+//                            a deep learn (Brain.buildDeepLearn): ~one guide per real task with 3-6 user phrasings
+//                            each, plus short answers to questions the map's facts answer. docs: optional vendor
+//                            workflows [{ title, text }] or pasted text, capped (Brain.cleanDocs) and sent as
+//                            untrusted reference text. The cost estimate is logged before the first call.
 //                            (also allowed with header x-scopos-learn-token = SCOPOS_LEARN_TOKEN)
 //   GET  /api/scopos/stats   token usage, cache hits, today's budget, this month's spend { month: { spent, cap } }
 //   GET  /api/ext/status     { disk: {version, sig}, loaded: {version, sig, id, seenAt} | null, upToDate, recent,
@@ -48,6 +55,7 @@
 import { createServer } from 'node:http';
 import { readFile, writeFile, rm } from 'node:fs/promises';
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
+import { gzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { dirname, join, normalize, extname, sep } from 'node:path';
@@ -58,8 +66,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const Brain = createRequire(import.meta.url)('../extension/core/brain.js');
 const PORT = +process.env.PORT || 4173;
 const KEY_FILE = join(root, '.scopos-key.local');
-const KNOWLEDGE_FILE = join(root, '.scopos-knowledge.local.json');
-const ANSWERS_FILE = join(root, '.scopos-answers.local.json');
+const KNOWLEDGE_FILE = process.env.SCOPOS_KNOWLEDGE_FILE || join(root, '.scopos-knowledge.local.json'); // env: tests only
+const ANSWERS_FILE = process.env.SCOPOS_ANSWERS_FILE || join(root, '.scopos-answers.local.json');
 const USAGE_FILE = process.env.SCOPOS_USAGE_FILE || join(root, '.scopos-usage.local.json'); // the env override is for tests
 const DAILY_LIMIT = +process.env.SCOPOS_DAILY_LIMIT || 2000;
 const MONTHLY_USD = (v => (v !== '' && Number.isFinite(+v) && +v >= 0 ? +v : 5))(String(process.env.SCOPOS_MONTHLY_USD ?? '').trim());
@@ -182,7 +190,7 @@ const cacheWriteTokens = u => {
 // $ per 1M tokens: input, output, cache-read multiplier (platform.claude.com pricing, checked 2026-10-17;
 // a 1h cache write is 2x input for all of them).
 const PRICE = { 'claude-fable-5-1': [10, 50, 0.025], 'claude-opus-5-5': [4, 20, 0.05], 'claude-sonnet-5-5': [2, 10, 0.05], 'claude-haiku-5-5': [0.1, 0.5, 0.1] }; // $ per 1M tokens
-const stats = { since: new Date().toISOString(), calls: 0, cacheHits: 0, guideHits: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, byKind: {} };
+const stats = { since: new Date().toISOString(), calls: 0, cacheHits: 0, guideHits: 0, faqHits: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, cost: 0, byKind: {} };
 function usageLogger(kind) {
   return (u, model) => {
     if (!u) return;
@@ -325,11 +333,33 @@ function askCacheTtl() {
   recentAsks.push(now);
   return recentAsks.length >= 3 ? '1h' : '5m';
 }
+// The learned guides and FAQ as a local index (Brain.instantIndex), built once per knowledge.
+let instantIx = null, instantFor = null;
+function instantIndex() {
+  if (!knowledge || typeof Brain.instantIndex !== 'function') return null;
+  if (instantFor !== knowledge) { instantIx = Brain.instantIndex({ guides: knowledge.guides || [], faq: knowledge.faq || [], product: knowledge.product || '' }); instantFor = knowledge; }
+  return instantIx;
+}
+/** A question the learned guides or facts answer for sure: the reply, with no Claude call. Otherwise null. */
+function instantReply(question) {
+  const ix = instantIndex();
+  if (!ix) return null;
+  const m = Brain.instantMatch(ix, question);
+  if (m.kind === 'guide') { stats.guideHits++; return { answer: `Сценарий «${m.guide.name}»`, steps: m.steps, ready: true, source: 'playbook', live: !!m.guide.live, guide: m.guide.id }; }
+  if (m.kind === 'fact') { stats.faqHits = (stats.faqHits || 0) + 1; return { answer: m.answer, steps: [], ready: true, source: 'faq', show: m.show ? m.show.id : null }; }
+  return null;
+}
+
 async function api(req, res) {
   let body;
   try { body = await readBody(req, 200_000); } catch (e) { return json(res, 400, { error: 'Неверный запрос' }); }
   const page = cleanPage(body.page);
   if (!page) return json(res, 400, { error: 'Нет карты страницы' });
+  // Learned guides and facts answer first: 0 tokens, and also without a key. force: the user asked Claude on purpose.
+  if (!body.locate && body.force !== true && typeof body.question === 'string' && !(Array.isArray(body.progress) && body.progress.length)) {
+    const hit = instantReply(str(body.question, 600).trim());
+    if (hit) return json(res, 200, hit);
+  }
   if (!KEY) return json(res, 503, { error: 'Ключ Claude ещё не подключён: откройте /setup. Сценарии работают и без него.' });
 
   const signal = clientGone(res);
@@ -386,29 +416,26 @@ async function api(req, res) {
   }
 }
 
-// ---------- POST /api/scopos/learn ----------
-let learning = false;
-// Model output to runnable guides: finishGuides drops only the bad steps (not the whole guide), appends the
-// commit a form needs and flags guides that continue live where the map stops.
-function learnedGuides(raw, map) {
-  if (typeof Brain.finishGuides === 'function') {
-    const guides = Brain.finishGuides({ guides: raw }, map).map((g, i) => ({ id: 'learned-' + (i + 1), name: String(g.name).slice(0, 90), learned: true, live: !!g.live, steps: g.steps }));
-    return { guides, dropped: raw.length - guides.length };
+// ---------- GET /api/scopos/knowledge ----------
+// What the widget answers from locally: guides and the FAQ (a few hundred KB for a TMS-size product, ~40 KB gzipped).
+// Every page load of the widget asks for it, so it carries an ETag (304 when nothing was learned since) and is gzipped.
+let knowledgeOut = { of: undefined, body: null, gzip: null, etag: '' };
+function knowledgeRoute(req, res) {
+  if (knowledgeOut.of !== knowledge) {
+    const data = knowledge ? { learnedAt: knowledge.learnedAt, summary: knowledge.summary, guides: knowledge.guides, faq: knowledge.faq || [], views: knowledge.map.views.length } : { guides: [], faq: [] };
+    const body = Buffer.from(JSON.stringify(data));
+    knowledgeOut = { of: knowledge, body, gzip: gzipSync(body), etag: `"k-${createHash('sha256').update(body).digest('hex').slice(0, 20)}"` };
   }
-  return learnedGuidesOld({ guides: raw }, map);
-}
-function learnedGuidesOld(out, map) {
-  const refs = new Set();
-  map.views.forEach(v => v.controls.forEach(c => refs.add(c.ref)));
-  const all = Array.isArray(out.guides) ? out.guides : [];
-  // Every referenced control must exist in the map, and a guide needs at least one pointer.
-  const guides = all
-    .filter(g => g && typeof g.name === 'string' && Array.isArray(g.steps) && g.steps.length && g.steps.every(s => !s.element_ref || refs.has(s.element_ref)))
-    .map((g, i) => ({ id: 'learned-' + (i + 1), name: g.name.slice(0, 90), learned: true, steps: Brain.refSteps(g.steps, map, g.name) }))
-    .filter(g => g.steps.some(s => s.target));
-  return { guides, dropped: all.length - guides.length };
+  const head = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache', etag: knowledgeOut.etag, vary: 'accept-encoding', 'x-content-type-options': 'nosniff' };
+  if (req.headers['if-none-match'] === knowledgeOut.etag) { res.writeHead(304, head); return res.end(); }
+  const gz = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+  const out = gz ? knowledgeOut.gzip : knowledgeOut.body;
+  res.writeHead(200, { ...head, 'content-length': out.length, ...(gz ? { 'content-encoding': 'gzip' } : {}) });
+  res.end(req.method === 'HEAD' ? undefined : out);
 }
 
+// ---------- POST /api/scopos/learn ----------
+let learning = false;
 async function learnApi(req, res) {
   if (!(localAdmin(req) && originOk(req, true)) && !tokenOk(req)) return json(res, 403, { error: 'Изучать продукт можно только с этого компьютера или с токеном изучения.' });
   let body;
@@ -421,31 +448,37 @@ async function learnApi(req, res) {
   if (!monthLeft()) return json(res, 429, { error: BUDGET_MSG });
   learning = true;
   const product = str(body.product, 120);
+  // Vendor workflows (tutorial titles, summaries, a URL list): hints for the guides, capped, never fetched.
+  const docs = typeof Brain.cleanDocs === 'function' ? Brain.cleanDocs(body.docs) : [];
   const signal = clientGone(res);
   let lastLog = 0;
   try {
-    // A big product is written in parts (related screens together); each part sees the names already written.
-    const bodies = typeof Brain.buildLearnBatches === 'function' ? null : [Brain.buildLearn({ map, product })];
-    const raw = [];
-    let summary = '';
-    const total = bodies ? 1 : Brain.buildLearnBatches({ map, product }).length;
-    for (let i = 0; i < total; i++) {
-      if (i > 0 && !monthLeft()) { console.log('[scopos] месячный бюджет кончился: остальные части не пишу'); break; }
-      const b = bodies ? bodies[0] : Brain.buildLearnBatches({ map, product, existing: raw.map(g => g.name) })[i];
-      if (!b) break;
-      const out = await Brain.call(b, KEY, {
-        fromBrowser: false, signal, onUsage: usageLogger('learn'),
-        onText: t => { const now = Date.now(); if (now - lastLog > 5000) { lastLog = now; console.log(`[scopos] Claude пишет гайды · часть ${i + 1} из ${total} · ${t.length} символов`); } },
-      });
-      if (!summary) summary = String(out.summary || '');
-      if (Array.isArray(out.guides)) raw.push(...out.guides.filter(g => g && typeof g.name === 'string' && Array.isArray(g.steps)));
-    }
-    const { guides, dropped } = learnedGuides(raw, map);
-    knowledge = { learnedAt: new Date().toISOString(), product, summary: summary.slice(0, 300), map, guides };
+    // A deep learn: parts of ~30 guides with the questions users ask for each, plus short answers from the map's facts.
+    const bodies = Brain.buildDeepLearn({ map, product, docs });
+    const est = Brain.learnEstimate(bodies);
+    console.log(`[scopos] изучение: ${map.views.length} экранов → ${bodies.length} частей, ~${est.guides} гайдов${docs.length ? `, ${docs.length} инструкций вендора` : ''}; оценка ~$${est.usd.toFixed(2)} (${bodies[0] && bodies[0].model})`);
+    let done = 0;
+    const outs = await Brain.learnRun(bodies, (b, i) => Brain.call(b, KEY, {
+      fromBrowser: false, signal, onUsage: usageLogger('learn'),
+      onText: t => { const now = Date.now(); if (now - lastLog > 5000) { lastLog = now; console.log(`[scopos] Claude пишет гайды · часть ${i + 1} из ${bodies.length} · ${t.length} символов`); } },
+    }), {
+      concurrency: 3,
+      stop: () => (signal.aborted ? 'cancelled' : !monthLeft() ? 'budget' : null),
+      onPart: () => { done++; console.log(`[scopos] готово частей: ${done} из ${bodies.length}`); },
+    });
+    const failed = outs.filter(o => o && o.error);
+    if (failed.length) console.log(`[scopos] не написано частей: ${failed.length} (${[...new Set(failed.map(o => o.error))].join('; ').slice(0, 200)})`);
+    const fin = Brain.finishLearn(outs.filter(o => o && o.out), map);
+    const named = fin.guides.map((g, i) => ({ id: 'learned-' + (i + 1), name: String(g.name).slice(0, 90), learned: true, live: !!g.live, steps: g.steps, questions: g.questions || [] }));
+    const faq = Brain.buildFaq(named, fin.facts);
+    const guides = named.map(({ questions, ...g }) => g);
+    const rawCount = outs.reduce((n, o) => n + ((o && o.out && Array.isArray(o.out.guides)) ? o.out.guides.length : 0), 0);
+    const dropped = Math.max(0, rawCount - guides.length);
+    knowledge = { learnedAt: new Date().toISOString(), product, summary: fin.summary.slice(0, 300), map, guides, faq, ...(docs.length ? { docs } : {}) };
     await writeFile(KNOWLEDGE_FILE, JSON.stringify(knowledge));
     answers.clear(); persistAnswers(); // answers were tied to the old map
-    console.log(`[scopos] изучено: ${map.views.length} экранов, ${guides.length} гайдов${dropped ? `, ${dropped} отброшено` : ''}`);
-    return json(res, 200, { summary: knowledge.summary, guides, views: map.views.length, dropped, learnedAt: knowledge.learnedAt });
+    console.log(`[scopos] изучено: ${map.views.length} экранов, ${guides.length} гайдов, ${faq.length} вопросов в FAQ (${fin.facts.length} фактов)${dropped ? `, ${dropped} отброшено` : ''}`);
+    return json(res, 200, { summary: knowledge.summary, guides, faq, facts: fin.facts.length, views: map.views.length, dropped, parts: bodies.length, failedParts: failed.length, learnedAt: knowledge.learnedAt });
   } catch (e) {
     if (signal.aborted) return;
     return json(res, 502, { error: e.message || 'Claude не ответил' });
@@ -841,9 +874,9 @@ async function handle(req, res) {
     if (path === '/api/scopos' && req.method === 'POST') return await api(req, res);
     if (path === '/api/scopos/learn' && req.method === 'POST') return await learnApi(req, res);
     if (path === '/api/key') return await keyApi(req, res);
-    if (path === '/api/scopos/stats') return json(res, 200, { ...stats, cost: +stats.cost.toFixed(4), today: { date: day.date, calls: day.calls, limit: DAILY_LIMIT }, month: { month: monthKey(), spent: +monthNow().spent.toFixed(4), cap: MONTHLY_USD, calls: monthNow().calls || 0 }, cachedAnswers: answers.size, knowledge: knowledge ? { learnedAt: knowledge.learnedAt, views: knowledge.map.views.length, guides: knowledge.guides.length } : null });
+    if (path === '/api/scopos/stats') return json(res, 200, { ...stats, cost: +stats.cost.toFixed(4), today: { date: day.date, calls: day.calls, limit: DAILY_LIMIT }, month: { month: monthKey(), spent: +monthNow().spent.toFixed(4), cap: MONTHLY_USD, calls: monthNow().calls || 0 }, cachedAnswers: answers.size, knowledge: knowledge ? { learnedAt: knowledge.learnedAt, views: knowledge.map.views.length, guides: knowledge.guides.length, faq: (knowledge.faq || []).length } : null });
     if (path === '/api/ext/status') return json(res, 200, extStatus());
-    if (path === '/api/scopos/knowledge') return json(res, 200, knowledge ? { learnedAt: knowledge.learnedAt, summary: knowledge.summary, guides: knowledge.guides, views: knowledge.map.views.length } : { guides: [] });
+    if (path === '/api/scopos/knowledge') return knowledgeRoute(req, res);
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 404, { error: 'Not found' });
     if (isSetup) return await file(res, 'demo/setup.html', { setup: true });
     const sdkPath = SDK_PATH.exec(path);

@@ -10,6 +10,8 @@
  *   playbooks:<origin> = [{ id, name, steps, created, runs, learned?, live? }]  saved and learned guides (0 tokens)
  *   answers:<origin>   = [{ k, answer, steps, via, at }]                  last 200 answers (0 tokens on repeat)
  *   map:<origin>, learn:<origin>                                         the explorer's product map and learn state
+ *   faq:<origin>       = [{ q, guide, answer, answer_ru?, fact? }]        learned phrasings and facts (instant answers, 0 tokens)
+ *   docs:<origin>      = string                                           vendor workflows pasted in the panel (learning hints)
  *   passive:<origin>   = { newViews: [id], lastGuidesAt }                 views seen while browsing since the last guide writing
  *   usage              = { total, origins, months: { 'YYYY-MM': { tokens, cost, calls } } }
  *   settings: apiKey (+ apiKeySource 'server' when it came from the local server's /setup handoff), devServer (default http://localhost:4173), monthlyLimit ($, default 2), autoGuides (default true)
@@ -344,33 +346,29 @@ function pathTemplate(url) {
   } catch (e) { return ''; }
 }
 
-// ---------- local intent matcher: a question that names a saved guide runs it with 0 tokens ----------
+// ---------- instant answers: guides, their FAQ phrasings and learned facts matched locally, 0 tokens ----------
+// faq:<origin> = [{ q, guide, answer, fact? }] written by learning (Brain.buildFaq). The index over a site's guides and
+// FAQ (Brain.instantIndex) is built once and again only when either changes.
+const faqKey = origin => `faq:${origin}`;
+const getFaq = async origin => (await chrome.storage.local.get(faqKey(origin)))[faqKey(origin)] || [];
+const instantCache = new Map(); // origin -> { sig, ix }
+async function instantMatch(origin, question) {
+  if (typeof Brain.instantIndex !== 'function') return { kind: 'none', suggest: [] };
+  const [list, faq] = await Promise.all([getPlaybooks(origin), getFaq(origin)]);
+  const sig = list.map(p => `${p.id}:${(p.steps || []).length}:${p.name}`).join('|') + '#' + faq.length;
+  let c = instantCache.get(origin);
+  if (!c || c.sig !== sig) {
+    c = { sig, ix: Brain.instantIndex({ guides: list, faq }) };
+    instantCache.set(origin, c);
+    while (instantCache.size > 8) instantCache.delete(instantCache.keys().next().value);
+  }
+  return Brain.instantMatch(c.ix, question);
+}
 const STOP = new Set(['как', 'где', 'мне', 'можно', 'сделать', 'это', 'хочу', 'нужно', 'надо', 'что', 'чтобы', 'свой', 'свою', 'мой', 'мою', 'пожалуйста', 'how', 'the', 'can', 'where', 'what', 'and', 'want', 'need']);
-const ACTION = ['отмен', 'удал', 'измен', 'выключ', 'отключ', 'убра', 'убер', 'смен', 'помен', 'cancel', 'delet', 'remov', 'edit', 'chang', 'disabl', 'turn off'];
 function stems(s) {
   return Brain.norm(s).replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/)
     .filter(w => w.length > 2 && !STOP.has(w))
     .map(w => { let x = w; for (let i = 0; i < 2 && x.length > 4 && /[аеиоуыэюяйь]$/.test(x); i++) x = x.slice(0, -1); return x.slice(0, 6); });
-}
-const same = (a, b) => a === b || (a.length >= 4 && b.length >= 4 && (a.startsWith(b) || b.startsWith(a)));
-const coverage = (from, to) => (from.length ? from.filter(w => to.some(t => same(w, t))).length / from.length : 0);
-function actions(s) { const n = ' ' + Brain.norm(s) + ' '; return new Set(ACTION.filter(a => n.includes(' ' + a))); }
-/** { run: guide | null, suggest: [guide] }: run only when both directions agree and no action verb differs. */
-function matchGuides(question, list) {
-  const q = stems(question), qa = actions(question);
-  const scored = [];
-  for (const pb of list) {
-    const n = stems(pb.name);
-    if (!n.length || !q.length) continue;
-    const toQ = coverage(n, q), toN = coverage(q, n);
-    const na = actions(pb.name);
-    const verbClash = [...qa].some(a => !na.has(a)) || [...na].some(a => !qa.has(a));
-    scored.push({ pb, toQ, toN, score: (toQ + toN) / 2, sure: toQ >= 0.75 && toN >= 0.6 && !verbClash });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  const best = scored.find(s => s.sure);
-  if (best && best === scored[0]) return { run: best.pb, suggest: [] };
-  return { run: null, suggest: scored.filter(s => s.score >= 0.4 || s.sure).slice(0, 3).map(s => s.pb) };
 }
 
 // ---------- answer cache: the same question on the same screen replays instantly ----------
@@ -484,12 +482,15 @@ async function ask(tabId, question, { force = false } = {}) {
     const prev = await getSession(tabId);
     const history = (prev && prev.history) || [];
 
-    // 1. A saved or learned guide with the same intent: run it, 0 tokens.
+    // 1. A saved or learned guide (by its name or a FAQ phrasing), or a learned fact: answered here, 0 tokens.
     if (!force) {
-      const m = matchGuides(question, await getPlaybooks(origin));
-      if (m.run) {
-        bumpRuns(origin, m.run.id);
-        return await start(tabId, runId, { question, answer: `Сценарий «${m.run.name}»`, steps: m.run.steps, source: 'playbook', via: 'playbook', playbookId: m.run.id, live: !!m.run.live, ms: Date.now() - t0, origin });
+      const m = await instantMatch(origin, question);
+      if (m.kind === 'guide') {
+        bumpRuns(origin, m.guide.id);
+        return await start(tabId, runId, { question, answer: `Сценарий «${m.guide.name}»`, steps: m.steps, source: 'playbook', via: 'playbook', playbookId: m.guide.id, live: !!m.guide.live, ms: Date.now() - t0, origin });
+      }
+      if (m.kind === 'fact') {
+        return await start(tabId, runId, { question, answer: m.answer, steps: [], source: 'faq', via: 'faq', show: m.show ? { id: m.show.id, name: m.show.name } : null, ms: Date.now() - t0, origin, history: pushHistory(history, question, m.answer) });
       }
       if (m.suggest.length) return await patchSession(tabId, { status: 'suggest', suggestions: m.suggest.map(p => ({ id: p.id, name: p.name })), ms: Date.now() - t0 }, runId);
     }
@@ -827,37 +828,43 @@ const runnableSteps = (steps, map, name) => (Array.isArray(steps) && steps.some(
 const batchesReady = () => typeof Brain.buildLearnBatches === 'function' && typeof Brain.finishGuides === 'function';
 
 /**
- * Writes guides from a map in batches (buildLearnBatches → one call each → finishGuides). Stops early on abort or
- * when the monthly limit is reached; a later batch that fails keeps what the earlier ones wrote.
- * Returns { guides: [playbook], dropped, summary, error? }.
+ * Writes guides from a map: a deep learn (Brain.buildDeepLearn: parts of ~30 guides, each with the questions users ask
+ * for it, plus short answers from the map's facts), the first part alone and then 3 at a time (Brain.learnRun).
+ * Stops early on abort or when the monthly limit is reached; parts that fail keep what the others wrote.
+ * docs: the vendor workflows pasted in the panel (untrusted hints). Returns { guides: [playbook with .questions],
+ * facts, dropped, summary, error? }; Brain.buildFaq(guides, facts) turns the questions and facts into the FAQ.
  */
-async function writeGuides(origin, { map, guideMap, existing = [], a, ctl, onText, onBatch }) {
-  const bodies = Brain.buildLearnBatches({ map: guideMap || map, product: '', existing }) || [];
-  const raw = [];
-  let summary = '', error = null, chars = 0;
-  for (let i = 0; i < bodies.length; i++) {
-    if (ctl.signal.aborted) throw aborted();
-    if (await overBudget()) { error = await budgetMessage(); break; }
-    if (onBatch) onBatch(i, bodies.length);
-    try {
-      const base = chars;
-      const out = await claude(bodies[i], a, origin, { signal: ctl.signal, onText: onText && (t => onText(base + t.length)) });
-      if (out && Array.isArray(out.guides)) raw.push(...out.guides);
-      if (!summary && out && out.summary) summary = String(out.summary);
-      chars = base + JSON.stringify(out || {}).length;
-    } catch (e) {
-      if (ctl.signal.aborted || !raw.length) throw e;
-      error = (e && e.message) || String(e);
-      break;
-    }
-  }
-  const finished = Brain.finishGuides(raw, map) || [];
-  const guides = finished
+async function writeGuides(origin, { map, guideMap, existing = [], docs = null, a, ctl, onText, onBatch }) {
+  const deep = typeof Brain.buildDeepLearn === 'function';
+  const bodies = (deep ? Brain.buildDeepLearn({ map: guideMap || map, product: '', existing, docs }) : Brain.buildLearnBatches({ map: guideMap || map, product: '', existing })) || [];
+  const chars = new Array(bodies.length).fill(0);
+  let error = null, started = 0;
+  const outs = await Brain.learnRun(bodies, (b, i) => claude(b, a, origin, { signal: ctl.signal, onText: onText && (t => { chars[i] = t.length; onText(chars.reduce((x, y) => x + y, 0)); }) }), {
+    concurrency: 3,
+    stop: async i => {
+      if (ctl.signal.aborted) throw aborted();
+      if (await overBudget()) { error = await budgetMessage(); return 'budget'; }
+      if (onBatch) onBatch(started++, bodies.length);
+      return null;
+    },
+  });
+  if (ctl.signal.aborted) throw aborted();
+  const failed = outs.filter(o => o && o.error && !o.skipped);
+  if (!error && failed.length) error = failed[0].error;
+  const fin = deep ? Brain.finishLearn(outs.filter(o => o && o.out), map) : { summary: '', facts: [], guides: Brain.finishGuides(outs.filter(o => o && o.out).flatMap(o => o.out.guides || []), map) || [] };
+  const raw = outs.reduce((n, o) => n + ((o && o.out && Array.isArray(o.out.guides)) ? o.out.guides.length : 0), 0);
+  const guides = fin.guides
     .filter(g => g && g.name && Array.isArray(g.steps) && g.steps.length)
-    .map(g => ({ id: crypto.randomUUID(), name: String(g.name).slice(0, 90), steps: runnableSteps(g.steps, map, g.name), created: Date.now(), runs: 0, learned: true, live: !!g.live }))
+    .map(g => ({ id: crypto.randomUUID(), name: String(g.name).slice(0, 90), steps: runnableSteps(g.steps, map, g.name), created: Date.now(), runs: 0, learned: true, live: !!g.live, questions: g.questions || [] }))
     .filter(g => g.steps.some(st => st && st.target));
-  return { guides, dropped: Math.max(0, raw.length - guides.length), summary, error };
+  return { guides, facts: fin.facts || [], dropped: Math.max(0, raw - guides.length), summary: fin.summary || outs.map(o => o && o.out && o.out.summary).find(Boolean) || '', error };
 }
+/** Guides as stored (playbooks:<origin>): their FAQ phrasings live in faq:<origin>, not on the guide. */
+const storedGuide = ({ questions, ...g }) => g;
+
+// ---------- vendor docs: workflows the user pasted for this site, hints for learning ----------
+const docsKey = origin => `docs:${origin}`;
+const getDocs = async origin => (await chrome.storage.local.get(docsKey(origin)))[docsKey(origin)] || '';
 
 async function learnFrom(origin, map) {
   if (learnCtl.has(origin)) return; // one writer per site
@@ -880,11 +887,14 @@ async function learnFrom(origin, map) {
       if (now - lastMsg > 400) { lastMsg = now; broadcast({ type: 'learn:progress', origin, chars: n }); }
       if (now - lastBeat > 15e3) { lastBeat = now; setLearn(origin, { heartbeatAt: now, chars: n }).catch(() => {}); }
     };
-    let guides, dropped, summary, note = null;
+    let guides, dropped, summary, note = null, faq = [];
     if (batchesReady()) {
       const existing = (await getPlaybooks(origin)).filter(p => !p.learned).map(p => p.name);
-      const r = await writeGuides(origin, { map, existing, a, ctl, onText: onChars, onBatch: (i, n) => setLearn(origin, { batch: i + 1, batches: n, heartbeatAt: Date.now() }).catch(() => {}) });
+      const docs = await getDocs(origin);
+      const r = await writeGuides(origin, { map, existing, docs, a, ctl, onText: onChars, onBatch: (i, n) => setLearn(origin, { batch: i + 1, batches: n, heartbeatAt: Date.now() }).catch(() => {}) });
       ({ guides, dropped, summary } = r);
+      if (typeof Brain.buildFaq === 'function') faq = Brain.buildFaq(guides, r.facts);
+      guides = guides.map(storedGuide);
       note = r.error;
     } else {
       // Older brain.js: one call for every guide.
@@ -893,9 +903,10 @@ async function learnFrom(origin, map) {
       summary = String(out.summary || '');
     }
     if (ctl.signal.aborted) return;
-    // Learned guides replace the previous learned set; scenarios the user recorded stay.
+    // Learned guides and their FAQ replace the previous learned set; scenarios the user recorded stay.
     await updatePlaybooks(origin, list => [...guides, ...list.filter(p => !p.learned)]);
-    await setLearn(origin, { status: 'done', views, probes: map.probes, guides: guides.length, dropped, summary: String(summary || '').slice(0, 300), at: Date.now(), error: note ? 'Часть гайдов не дописана: ' + note : null, chars: 0, batch: 0, batches: 0 });
+    await chrome.storage.local.set({ [faqKey(origin)]: faq });
+    await setLearn(origin, { status: 'done', views, probes: map.probes, guides: guides.length, faq: faq.filter(f => !f.answer).length, facts: new Set(faq.filter(f => f.answer).map(f => f.fact)).size, dropped, summary: String(summary || '').slice(0, 300), at: Date.now(), error: note ? 'Часть гайдов не дописана: ' + note : null, chars: 0, batch: 0, batches: 0 });
   } catch (e) {
     if (ctl.signal.aborted) return; // restarted or forgotten: that path owns the state
     await setLearn(origin, { status: 'error', error: (e && e.message) || String(e) }).catch(() => {});
@@ -1064,15 +1075,24 @@ async function maybeAutoGuides(origin, { force = false } = {}) {
   try {
     const list = await getPlaybooks(origin);
     const ids = fresh.filter(id => map.views.some(v => v.id === id));
-    const r = await writeGuides(origin, { map, guideMap: subMap(map, ids), existing: list.map(p => p.name), a, ctl });
+    const r = await writeGuides(origin, { map, guideMap: subMap(map, ids), existing: list.map(p => p.name), docs: await getDocs(origin), a, ctl });
     if (ctl.signal.aborted) return { skipped: 'aborted' };
-    let added = 0;
+    let added = 0, merged = [];
     await updatePlaybooks(origin, cur => {
       const learned = cur.filter(p => p.learned);
-      const merged = mergeLearned(learned, r.guides);
+      merged = mergeLearned(learned, r.guides);
       added = Math.max(0, merged.length - learned.length);
-      return [...merged, ...cur.filter(p => !p.learned)];
+      return [...merged.map(storedGuide), ...cur.filter(p => !p.learned)];
     });
+    // The new guides' phrasings and facts join the FAQ (a replaced guide keeps its id, so old phrasings stay valid).
+    if (typeof Brain.buildFaq === 'function') {
+      const fresh = Brain.buildFaq(merged.filter(g => g.questions && g.questions.length), r.facts).map(f => (f.fact ? { ...f, fact: 'a' + Date.now().toString(36) + f.fact } : f));
+      await locked(faqKey(origin), async () => {
+        const ids = new Set(merged.map(g => g.id));
+        const old = (await getFaq(origin)).filter(f => f.answer || ids.has(f.guide));
+        await chrome.storage.local.set({ [faqKey(origin)]: [...old, ...fresh].slice(0, 4000) });
+      });
+    }
     await locked(passiveKey(origin), async () => {
       const cur = await getPassive(origin);
       await chrome.storage.local.set({ [passiveKey(origin)]: { ...cur, newViews: (cur.newViews || []).filter(id => !ids.includes(id)), lastGuidesAt: Date.now() } });
@@ -1131,7 +1151,7 @@ async function learnForget(origin) {
     await toTab(cur.tabId, { type: 'explore:stop' }).catch(() => {});
     await netUnblock(cur.tabId);
   }
-  await chrome.storage.local.remove([mapKey(origin), passiveKey(origin)]);
+  await chrome.storage.local.remove([mapKey(origin), passiveKey(origin), faqKey(origin)]);
   await cacheClear(origin);
   await updateLearn(origin, () => null);
   await updatePlaybooks(origin, list => list.filter(p => !p.learned));
@@ -1321,7 +1341,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // ---------- messages ----------
-const PANEL_TYPES = new Set(['ask', 'session', 'stop', 'go', 'playbooks', 'playbook:save', 'playbook:delete', 'playbook:run', 'record:start', 'record:stop', 'learn:start', 'learn:stop', 'learn:finish', 'learn:state', 'learn:forget', 'usage', 'usage:reset', 'cache:drop', 'access', 'key:state', 'key:handoff']);
+const PANEL_TYPES = new Set(['ask', 'session', 'stop', 'go', 'playbooks', 'playbook:save', 'playbook:delete', 'playbook:run', 'record:start', 'record:stop', 'learn:start', 'learn:stop', 'learn:finish', 'learn:state', 'learn:forget', 'learn:docs', 'usage', 'usage:reset', 'cache:drop', 'access', 'key:state', 'key:handoff']);
 // Our own extension pages only: the side panel, or the same page opened in a tab (tests, a pinned panel tab).
 // Content scripts report the web page's URL, and no extension page is web-accessible, so a site can't pass this.
 const fromPanel = sender => sender.id === chrome.runtime.id && typeof sender.url === 'string' && sender.url.startsWith(chrome.runtime.getURL(''));
@@ -1418,6 +1438,13 @@ async function handle(msg, sender) {
     }
     case 'learn:state': return { learn: await readLearn(msg.origin), hasMap: !!(await getMap(msg.origin)), writing: learnCtl.has(msg.origin) };
     case 'learn:forget': await learnForget(msg.origin); return { ok: true };
+    case 'learn:docs': {
+      // The vendor's workflows for this site, pasted in the panel: kept as typed (capped), parsed and capped again at learn time.
+      if (typeof msg.origin !== 'string' || !/^https?:\/\//.test(msg.origin)) return { error: 'Нет сайта' };
+      if (typeof msg.text === 'string') await chrome.storage.local.set({ [docsKey(msg.origin)]: msg.text.slice(0, 20000) });
+      const text = await getDocs(msg.origin);
+      return { text, count: typeof Brain.cleanDocs === 'function' ? Brain.cleanDocs(text).length : 0 };
+    }
     case 'usage': {
       const all = (await chrome.storage.local.get('usage')).usage || { total: { tokens: 0, cost: 0, calls: 0 }, origins: {} };
       const mo = (all.months && all.months[monthKey()]) || { tokens: 0, cost: 0, calls: 0 };

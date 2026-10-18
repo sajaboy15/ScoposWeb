@@ -1,16 +1,16 @@
 {
   "loader": "scopos.js",
-  "core": "scopos-core.3dec172bbb.js",
+  "core": "scopos-core.e753440940.js",
   "learn": "scopos-learn.16d19da719.js",
   "minified": true,
   "sizes": {
     "scopos.js": {
       "raw": 4414,
-      "gzip": 2346
+      "gzip": 2347
     },
-    "scopos-core.3dec172bbb.js": {
-      "raw": 121904,
-      "gzip": 45600
+    "scopos-core.e753440940.js": {
+      "raw": 139201,
+      "gzip": 52818
     },
     "scopos-learn.16d19da719.js": {
       "raw": 79001,

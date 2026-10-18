@@ -19,6 +19,12 @@ before a call once the ledger reaches `$EVAL_BUDGET` (default $4).
 | `eval-locate.mjs` | locate: renamed / removed controls on shuffled real pages |
 | `eval-continue.mjs` | continue: 5 live-guide continuations on real pages |
 | `summarize.mjs` | one line per saved run, re-graded with the current grader; no Claude call |
+| `run-deep-learn.mjs` | deep learn (`buildDeepLearn` → `learnRun` → `finishLearn` → `buildFaq`): prints the plan and cost estimate, sends with `--yes`, keeps each part's reply, writes `knowledge-<name>.json` (`--docs file`: vendor workflows) |
+| `eval-local.mjs` | instant answers: every task through `Brain.instantMatch` (no Claude), the guide it runs graded like ask-map; share right / wrong / suggestions / to Claude, and speed on 300 guides × 6 phrasings (`--extra`, `--holdout`) |
+| `tasks-*-extra.json`, `tasks-tms-holdout.json` | more questions for instant answers (extra was used while tuning; holdout was written after it) |
+
+Instant answers (research/12): `node dev/eval/run-deep-learn.mjs --map $EVAL_OUT/walk-tms.json --product "Haulr TMS" --name tms --yes`
+(~$0.5), then `node dev/eval/eval-local.mjs --product tms --map $EVAL_OUT/walk-tms.json --knowledge $EVAL_OUT/knowledge-tms.json --extra --holdout`.
 
 ## Rerun
 

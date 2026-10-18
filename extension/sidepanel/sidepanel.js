@@ -50,25 +50,39 @@
     if (!tab || !tab.origin) { learn = null; hasMap = false; return; }
     const r = await bg({ type: 'learn:state', origin: tab.origin });
     learn = r.learn || null; hasMap = !!r.hasMap;
+    await loadDocs();
     if (learn && learn.chars) learnChars = learn.chars;
   }
   const redo = `<div class="row links"><button class="link" data-learn="restart">Изучить заново</button><button class="link" data-learn="forget">Забыть</button></div>`;
+  // Vendor workflows (tutorial titles, summaries, a list of help-center links): optional hints for the next learn.
+  let docsText = '', docsCount = 0, docsOrigin = '';
+  const learnBusyNow = () => !!learn && (learn.status === 'exploring' || learn.status === 'writing');
+  async function loadDocs() {
+    if (!tab || !tab.origin || docsOrigin === tab.origin) return;
+    const r = await bg({ type: 'learn:docs', origin: tab.origin });
+    docsOrigin = tab.origin; docsText = r.text || ''; docsCount = r.count || 0;
+  }
+  const docsBox = () => `<details class="docs"${docsText ? ' open' : ''}><summary>Инструкции продукта (необязательно)${docsCount ? ` · ${docsCount}` : ''}</summary>
+      <p class="faint small">Вставьте названия уроков из справки или обучающих видео, их краткое содержание или список ссылок, по одному на строку. Scopos напишет гайд для каждого сценария, который есть на экранах продукта, и назовёт его так же. Ссылки не открываются: берутся только слова из них.</p>
+      <textarea id="docs" rows="4" maxlength="20000" placeholder="Как создать груз&#10;Как выставить счёт брокеру&#10;https://help.example.com/dispatch-a-load" aria-label="Инструкции продукта">${esc(docsText)}</textarea></details>`;
   function renderLearn() {
     const box = $('#learn-box');
     if (!box) return;
+    // Someone is typing the vendor's workflows: don't pull the field from under the cursor.
+    if (document.activeElement && document.activeElement.id === 'docs' && (!learn || !learnBusyNow())) return;
     const L = learn || {};
     if (L.status === 'exploring') {
       box.innerHTML = `<h3>Изучаю продукт</h3><div class="stat"><div><b>${L.views || 0}</b><span>экранов</span></div><div><b>${L.probes || 0}</b><span>кнопок проверено</span></div></div>
         <div class="now"><span class="spin"></span><span>${esc(L.label || 'Хожу по экранам')}</span></div>
         <div class="row"><button class="btn soft" data-learn="finish">Хватит, писать гайды</button><button class="btn ghost" data-learn="stop">Отменить</button></div>${redo}`;
     } else if (L.status === 'writing') {
-      box.innerHTML = `<h3>Пишу гайды</h3><p>Изучил ${L.views || 0} экранов и окон. Claude пишет по карте готовые инструкции, обычно за минуту-две.</p>
+      box.innerHTML = `<h3>Пишу гайды</h3><p>Изучил ${L.views || 0} экранов и окон. Claude пишет по карте готовые инструкции и вопросы, которыми их ищут, обычно за две-четыре минуты. Потом почти любой вопрос отвечается мгновенно.</p>
         <div class="now"><span class="spin"></span><span id="learn-now">${learnText()}</span></div>${redo}`;
     } else if (L.status === 'done' || L.status === 'mapped') {
       const when = L.at ? new Date(L.at).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) : '';
-      box.innerHTML = `<h3>Продукт изучен${when ? ' · ' + when : ''}</h3><div class="stat"><div><b>${L.views || 0}</b><span>экранов и окон</span></div><div><b>${L.guides || 0}</b><span>готовых гайдов</span></div></div>
+      box.innerHTML = `<h3>Продукт изучен${when ? ' · ' + when : ''}</h3><div class="stat"><div><b>${L.views || 0}</b><span>экранов и окон</span></div><div><b>${L.guides || 0}</b><span>готовых гайдов</span></div>${L.faq ? `<div><b>${L.faq + (L.facts || 0)}</b><span>ответов без Claude</span></div>` : ''}</div>
         ${L.summary ? `<p>${esc(L.summary)}</p>` : ''}${L.error ? `<p>${esc(L.error)}</p>` : ''}${L.autoAt ? `<p class="faint small">${L.autoAdded ? `Сам дописал ${ruCount(L.autoAdded, 'гайд', 'гайда', 'гайдов')} по новым экранам` : 'Просмотрел новые экраны'} · ${new Date(L.autoAt).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' })}</p>` : ''}${L.dropped ? `<p class="faint small">${L.dropped} ${L.dropped === 1 ? 'гайд отброшен' : 'гайдов отброшено'}: в них были кнопки, которых нет на карте.</p>` : ''}
-        <div class="row"><button class="btn ghost" data-learn="restart">Изучить заново</button><button class="btn ghost" data-learn="forget">Забыть</button></div>`;
+        <div class="row"><button class="btn ghost" data-learn="restart">Изучить заново</button><button class="btn ghost" data-learn="forget">Забыть</button></div>${docsBox()}`;
     } else if (L.status === 'stopped' || (L.status === 'error' && hasMap)) {
       box.innerHTML = `<h3>${L.status === 'stopped' ? 'Изучение остановлено' : 'Не получилось дописать гайды'}</h3>
         ${L.error ? `<p style="color:var(--bad)">${esc(L.error)}</p>` : '<p>Ничего не сохранено. Можно начать заново в любой момент.</p>'}
@@ -77,13 +91,24 @@
       box.innerHTML = `<h3>Научите Scopos этому сайту</h3><p>Scopos один раз сам пройдёт по всем экранам, вкладкам и окнам и запомнит каждую кнопку. Потом Claude напишет готовые гайды. Они работают мгновенно, а новые вопросы получают точные шаги по всему продукту.</p>
         ${L.status === 'error' ? `<p style="color:var(--bad)">${esc(L.error)}</p>` : ''}
         <button class="btn main" data-learn="${L.status === 'error' ? 'restart' : 'start'}">${L.status === 'error' ? 'Изучить заново' : 'Изучить продукт'}</button>
-        <p class="faint small" style="margin:10px 0 0">Нажимаю только то, что открывает экраны и окна. Ничего не заполняю, не сохраняю и не отправляю: пока я хожу по сайту, отправка форм и запросов на запись заблокирована. Лучше запускать под тестовым аккаунтом.</p>`;
+        <p class="faint small" style="margin:10px 0 0">Нажимаю только то, что открывает экраны и окна. Ничего не заполняю, не сохраняю и не отправляю: пока я хожу по сайту, отправка форм и запросов на запись заблокирована. Лучше запускать под тестовым аккаунтом.</p>${docsBox()}`;
     }
   }
   const learnText = () => {
     const part = learn && learn.batches > 1 ? ` · часть ${learn.batch || 1} из ${learn.batches}` : '';
     return learnChars ? `Claude пишет гайды${part} · ${learnChars.toLocaleString('ru-RU')} символов` : `Claude читает карту продукта${part}`;
   };
+  let docsTimer = 0;
+  $('#learn-box').addEventListener('input', e => {
+    if (e.target.id !== 'docs' || !tab) return;
+    docsText = e.target.value;
+    const origin = tab.origin;
+    clearTimeout(docsTimer);
+    docsTimer = setTimeout(async () => {
+      const r = await bg({ type: 'learn:docs', origin, text: docsText });
+      if (tab && tab.origin === origin && !r.error) { docsCount = r.count || 0; const s = $('#learn-box .docs summary'); if (s) s.textContent = `Инструкции продукта (необязательно)${docsCount ? ` · ${docsCount}` : ''}`; }
+    }, 500);
+  });
   $('#learn-box').addEventListener('click', e => {
     const b = e.target.closest('[data-learn]');
     if (b && tab) learnAct(b.dataset.learn);
@@ -262,6 +287,7 @@
     const fast = session.source === 'playbook';
     const cached = session.source === 'cache';
     const tag = fast ? '<span class="tag fast">Готовый гайд · мгновенно · 0 токенов</span>'
+      : session.source === 'faq' ? '<span class="tag fast">Готовый ответ · мгновенно · 0 токенов</span><button class="link" data-act="ask-anyway" title="Спросить Claude про то, что на экране сейчас">Спросить Claude</button>'
       : cached ? '<span class="tag fast">мгновенно · из кэша</span><button class="link" data-act="refresh" title="Забыть сохранённый ответ и спросить Claude">Спросить заново</button>'
       : `<span class="tag">Claude${session.source === 'map' ? ' · по карте продукта' : ''}${session.ms ? ' · ' + secs(session.ms) : ''}</span>`;
     feed.innerHTML = `
@@ -272,6 +298,7 @@
           <span class="dot"><span>${i + 1}</span></span>
           <div class="txt">${esc(s.instruction)}${s.value ? `<br><span class="val">${esc(s.value)}</span>` : ''}</div>
         </li>`).join('')}</ol>` : ''}
+      ${session.show && !steps.length ? `<div class="chips"><button class="chip pb" data-run="${esc(session.show.id)}">Показать на экране: ${esc(session.show.name)}</button></div>` : ''}
       <div class="meta">${tag}${session.replanning ? '<span class="tag">уточняю шаги для этой страницы…</span>' : ''}</div>
       ${steps.length && !done ? `<div class="actions row"><button class="btn ghost" data-act="stop">Остановить</button>${idx > 0 ? '<button class="btn ghost" data-act="restart">С начала</button>' : ''}</div>` : ''}
       ${!steps.length ? '<div class="actions row"><button class="btn ghost" data-act="new">Новый вопрос</button></div>' : ''}
