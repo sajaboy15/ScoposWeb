@@ -256,11 +256,11 @@ try {
   const exp = await until(() => page.evalScopos('window.__exp'));
   ok(exp && exp.netBlocked === true, 'explore:start carries net:true -> netBlocked', exp);
   ok((await W('scoposBusy()')) === true, 'scoposBusy() while exploring');
-  await W(`chrome.storage.session.set({ ['explore:${tabId}']: { status: 'running' } })`);
+  await W(`chrome.storage.local.set({ ['explore:${tabId}']: { status: 'running' } })`);
   const load = await page.evalScopos(`chrome.runtime.sendMessage({ type: 'explore:load' })`);
   ok(load.net === true, 'explore:load says net is up', load.net);
   await W(`handle({ type: 'learn:stop', tabId: ${tabId}, origin: '${origin}' }, {})`);
-  await W(`chrome.storage.session.remove('explore:${tabId}')`);
+  await W(`chrome.storage.local.remove('explore:${tabId}')`);
   ok((await W(`netActive(${tabId})`)) === false && (await W('scoposBusy()')) === false, 'after stop: net down, not busy');
 
   section('proxy: the local server pays');

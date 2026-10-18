@@ -585,6 +585,7 @@
   // Composite widgets that legitimately contain other controls (a tab with a close button, a select with a hidden input).
   const KEEP_ROLES = /^(combobox|tab|option|treeitem|menuitem|menuitemcheckbox|menuitemradio|switch|checkbox|radio|slider|spinbutton|textbox|searchbox|gridcell|row)$/;
   const NAMELESS_OK = /^(textbox|searchbox|combobox|spinbutton|select|checkbox|radio|switch|slider|file)$/;
+  const SVG_MAX = 12; // controls taken from inside one inline SVG drawing
 
   const explicitRole = el => (el.getAttribute('role') || '').trim().split(/\s+/)[0].toLowerCase();
   function roleOf(el) {
@@ -639,9 +640,19 @@
     const cached = t.pool.get(key);
     if (cached) return cached;
     const raw = deepQueryAll(CONTROL + ',' + POINTERISH, key);
-    const keep = [], set = new Set();
+    const keep = [], set = new Set(), perSvg = new Map();
     for (const el of raw) {
       if (set.has(el) || (flags(el) & BAD)) continue;
+      // Inside an inline SVG (a chart, a map with thousands of titled points): only an explicit button or link
+      // counts, at most SVG_MAX per drawing. Every focusable dot read as a control froze a scan for seconds.
+      if (el.ownerSVGElement) {
+        if (!/^(button|link|tab|menuitem|checkbox|radio|switch)$/.test(explicitRole(el))) continue;
+        let svg = el.ownerSVGElement;
+        while (svg.ownerSVGElement) svg = svg.ownerSVGElement;
+        const n = (perSvg.get(svg) || 0) + 1;
+        perSvg.set(svg, n);
+        if (n > SVG_MAX) continue;
+      }
       const tag = el.tagName;
       if (tag === 'LABEL') {
         // A label is listed only for a control that is itself hidden (styled checkboxes and switches).
@@ -656,7 +667,9 @@
         if (p && p.nodeType === 1 && styleOf(p).cursor === 'pointer') continue;
       }
       if (!isVisible(el)) continue;
-      if (styleOf(el).pointerEvents === 'none') continue; // can't be clicked: not interactive
+      // can't be clicked: not interactive. Except a disabled control (UI kits set pointer-events: none on it): the form's
+      // «Submit» or «Create batch» waits for a choice, and a guide must still know it is there (state "disabled").
+      if (styleOf(el).pointerEvents === 'none' && !(el.disabled === true || el.getAttribute('aria-disabled') === 'true')) continue;
       if (generic(el) && longText(el, 200)) continue; // a focusable region or card, not a control
       set.add(el);
       keep.push(el);

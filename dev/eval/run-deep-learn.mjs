@@ -49,7 +49,7 @@ const outs = await Brain.learnRun(bodies, async (b, i) => {
   return r.out;
 }, { concurrency: 3, stop: async i => (i >= limit ? 'not asked (--parts)' : spent() + 0.35 >= BUDGET ? 'budget' : null) });
 const ms = Date.now() - t0;
-const fin = Brain.finishLearn(outs.filter(o => o && o.out), map);
+const fin = Brain.finishLearn(outs.filter(o => o && o.out), map, { docs });
 const guides = fin.guides.map((g, i) => ({ id: 'learned-' + (i + 1), name: g.name, learned: true, live: !!g.live, steps: g.steps, questions: g.questions || [] }));
 const faq = Brain.buildFaq(guides, fin.facts);
 const stored = guides.map(({ questions, ...g }) => g);

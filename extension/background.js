@@ -115,6 +115,10 @@ const mapKey = origin => `map:${origin}`;
 const getMap = async origin => (await chrome.storage.local.get(mapKey(origin)))[mapKey(origin)] || null;
 const getKey = async () => (await chrome.storage.local.get('apiKey')).apiKey || '';
 const exploreKey = tabId => `explore:${tabId}`;
+// The walk state of a big product is several MB: chrome.storage.session caps all of it at 10 MB, so it lives in
+// chrome.storage.local (unlimitedStorage) and is removed when the walk ends, its tab closes or the worker starts
+// without that tab.
+const walkStore = chrome.storage.local;
 const learnTabKey = tabId => `learnTab:${tabId}`;
 
 // ---------- who pays for Claude: the extension's own key, else the local Scopos server as a proxy ----------
@@ -240,7 +244,8 @@ chrome.tabs.onRemoved.addListener(async tabId => {
   netUnblock(tabId); // hoisted; the explorer's network block dies with its tab
   const k = learnTabKey(tabId);
   const origin = (await chrome.storage.session.get(k))[k];
-  await chrome.storage.session.remove([sessionKey(tabId), exploreKey(tabId), k]).catch(() => {});
+  await chrome.storage.session.remove([sessionKey(tabId), k]).catch(() => {});
+  await walkStore.remove(exploreKey(tabId)).catch(() => {});
   if (origin) await updateLearn(origin, cur => (cur && cur.status === 'exploring' && cur.tabId === tabId ? { ...cur, status: 'error', error: 'Вкладку закрыли, изучение прервалось. Запустите его заново.' } : undefined)).catch(() => {});
 });
 
@@ -851,7 +856,7 @@ async function writeGuides(origin, { map, guideMap, existing = [], docs = null, 
   if (ctl.signal.aborted) throw aborted();
   const failed = outs.filter(o => o && o.error && !o.skipped);
   if (!error && failed.length) error = failed[0].error;
-  const fin = deep ? Brain.finishLearn(outs.filter(o => o && o.out), map) : { summary: '', facts: [], guides: Brain.finishGuides(outs.filter(o => o && o.out).flatMap(o => o.out.guides || []), map) || [] };
+  const fin = deep ? Brain.finishLearn(outs.filter(o => o && o.out), map, { docs }) : { summary: '', facts: [], guides: Brain.finishGuides(outs.filter(o => o && o.out).flatMap(o => o.out.guides || []), map) || [] };
   const raw = outs.reduce((n, o) => n + ((o && o.out && Array.isArray(o.out.guides)) ? o.out.guides.length : 0), 0);
   const guides = fin.guides
     .filter(g => g && g.name && Array.isArray(g.steps) && g.steps.length)
@@ -1125,7 +1130,7 @@ async function learnStart(tabId, restart) {
   abortTab(tabId);
   await toTab(tabId, { type: 'guide:stop' }).catch(() => {});
   await updateSession(tabId, () => null);
-  await chrome.storage.session.remove(exploreKey(tabId));
+  await walkStore.remove(exploreKey(tabId));
   await chrome.storage.session.set({ [learnTabKey(tabId)]: origin });
   const now = Date.now();
   await updateLearn(origin, () => ({ status: 'exploring', views: 0, probes: 0, label: 'Начинаю', error: null, tabId, startedAt: now, heartbeatAt: now }));
@@ -1325,6 +1330,15 @@ async function netCleanStale() {
   } catch (e) { /* ignore */ }
 }
 netCleanStale();
+// Walk states whose tab is gone (a browser restart, a crash) are dropped: local storage keeps them otherwise.
+(async () => {
+  try {
+    const all = await walkStore.get(null);
+    const tabs = new Set((await chrome.tabs.query({})).map(t => t.id));
+    const dead = Object.keys(all).filter(k => k.startsWith('explore:') && !tabs.has(+k.slice(8)));
+    if (dead.length) await walkStore.remove(dead);
+  } catch (e) { /* nothing to clean */ }
+})();
 
 // After a worker restart: what was busy before (running guides, walks) is busy still.
 (async () => {
@@ -1420,8 +1434,8 @@ async function handle(msg, sender) {
       const target = (cur && cur.tabId != null) ? cur.tabId : msg.tabId;
       // Mark the saved walk as cancelled first: if the page is mid-load, the next page must not resume it.
       const key = exploreKey(target);
-      const saved = (await chrome.storage.session.get(key))[key];
-      if (saved && saved.status === 'running') await chrome.storage.session.set({ [key]: { ...saved, stopping: true, cancelled: true } });
+      const saved = (await walkStore.get(key))[key];
+      if (saved && saved.status === 'running') await walkStore.set({ [key]: { ...saved, stopping: true, cancelled: true } });
       await toTab(target, { type: 'explore:cancel' }).catch(() => {});
       await netUnblock(target);
       return { ok: true };
@@ -1540,12 +1554,15 @@ async function handle(msg, sender) {
     // explorer state lives here, so a page load in the middle of the walk resumes on the next page
     case 'explore:load': {
       if (!fromTab) return {};
-      const st = (await chrome.storage.session.get(exploreKey(fromTab)))[exploreKey(fromTab)] || null;
+      const st = (await walkStore.get(exploreKey(fromTab)))[exploreKey(fromTab)] || null;
       return { st, net: st && st.status === 'running' ? await netActive(fromTab) : false };
     }
     case 'explore:save':
       if (!fromTab) return {};
-      try { await chrome.storage.session.set({ [exploreKey(fromTab)]: msg.st }); } catch (e) { return { error: 'Не хватило места для карты. Изучение остановлено.' }; }
+      try { await walkStore.set({ [exploreKey(fromTab)]: msg.st }); } catch (e) {
+        console.warn('[Scopos] the walk state was not saved:', (e && e.message) || e);
+        return { error: 'Не хватило места для карты. Изучение остановлено.', full: true };
+      }
       return {};
     case 'explore:progress': {
       if (!fromTab) return {};
@@ -1556,7 +1573,8 @@ async function handle(msg, sender) {
     case 'explore:abort': {
       if (!fromTab) return {};
       await netUnblock(fromTab);
-      await chrome.storage.session.remove([exploreKey(fromTab), learnTabKey(fromTab)]);
+      await chrome.storage.session.remove(learnTabKey(fromTab));
+      await walkStore.remove(exploreKey(fromTab));
       const origin = await (async () => { const all = await chrome.storage.local.get(null); const hit = Object.entries(all).find(([k, v]) => k.startsWith('learn:') && v && v.tabId === fromTab && learnBusy(v)); return hit ? hit[0].slice(6) : originOf(sender.tab.url); })();
       const why = msg.reason === 'origin' ? 'Изучение остановлено: вкладка ушла на другой сайт.' : msg.reason === 'redirect' ? 'Изучение остановлено: продукт перенаправляет на вход. Войдите и запустите снова.' : 'Изучение остановлено.';
       // A cancel is the user's own choice: a quiet "stopped", not an error.
@@ -1568,7 +1586,8 @@ async function handle(msg, sender) {
       // The walk is locked to the origin it started on; the tab may have moved since (e.g. an OAuth redirect).
       const origin = (msg.map && typeof msg.map.origin === 'string' && /^https?:\/\//.test(msg.map.origin)) ? msg.map.origin : originOf(sender.tab.url);
       await netUnblock(fromTab);
-      await chrome.storage.session.remove([exploreKey(fromTab), learnTabKey(fromTab)]);
+      await chrome.storage.session.remove(learnTabKey(fromTab));
+      await walkStore.remove(exploreKey(fromTab));
       const cur = await readLearnRaw(origin);
       // A cancelled or restarted walk, or a second "done" from the same walk: nothing to write.
       if (!cur || cur.status !== 'exploring' || learnCtl.has(origin) || !msg.map || !Array.isArray(msg.map.views) || !msg.map.views.length) {

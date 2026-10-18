@@ -22,6 +22,7 @@ before a call once the ledger reaches `$EVAL_BUDGET` (default $4).
 | `run-deep-learn.mjs` | deep learn (`buildDeepLearn` → `learnRun` → `finishLearn` → `buildFaq`): prints the plan and cost estimate, sends with `--yes`, keeps each part's reply, writes `knowledge-<name>.json` (`--docs file`: vendor workflows) |
 | `eval-local.mjs` | instant answers: every task through `Brain.instantMatch` (no Claude), the guide it runs graded like ask-map; share right / wrong / suggestions / to Claude, and speed on 300 guides × 6 phrasings (`--extra`, `--holdout`) |
 | `tasks-*-extra.json`, `tasks-tms-holdout.json` | more questions for instant answers (extra was used while tuning; holdout was written after it) |
+| `tasks-replica.json` | 34 tasks from the vendor tutorials of a real TMS, on its replica `demo/replica` (research/13) |
 
 Instant answers (research/12): `node dev/eval/run-deep-learn.mjs --map $EVAL_OUT/walk-tms.json --product "Haulr TMS" --name tms --yes`
 (~$0.5), then `node dev/eval/eval-local.mjs --product tms --map $EVAL_OUT/walk-tms.json --knowledge $EVAL_OUT/knowledge-tms.json --extra --holdout`.
@@ -67,6 +68,9 @@ check the labels in `tasks-*.json` against `Brain.mapText(map).text`.
   allowed); no other click; the last action is the expected commit; no ref outside the map. Tasks that should
   have no steps (facts, impossible tasks): no steps, and the answer matches the fact (or says it can't be done).
 - **usable**: as exact, but one non-critical expected step may be missing or one extra click may be there.
+- **live** (eval-local): a live guide (it stops at a control the explorer did not open and continues on the page) whose
+  steps are the start of an expected path, the missing labels all after them and no other press: not right, not wrong,
+  counted on its own. A live guide that went the wrong way is wrong. A click on a radio, checkbox or switch is a field.
   Labels marked `!` in a path are critical.
 - **lang**: the answer and every instruction are in the language of the question. Quoted labels («…», "…")
   are left out of the check, since they stay as on screen.

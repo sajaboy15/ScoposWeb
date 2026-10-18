@@ -158,6 +158,68 @@ const M = q => B.instantMatch(ix, q);
   check('a recorded scenario runs by its name', r.kind === 'guide' && r.guide.id === 'r1', r);
 }
 
+// ---------------- precision: the operation and the object must be the question's (DataTruck replica cases) ----------------
+{
+  const G = (id, name, steps, qs = []) => ({ guide: { id, name, live: false, steps: steps.map(([text, role = 'button', action = 'click']) => ({ instruction: `Click «${text}»`, action, target: T(text, { role }) })) }, qs });
+  const set = [
+    G('u', 'Upload a fuel file', [['Fuel', 'link'], ['Source files', 'link'], ['Upload file'], ['Provider', 'select', 'select'], ['Upload']], ['sync fuel transactions', 'upload fuel csv', 'add EFS fuel file']),
+    G('v', 'View fuel transactions', [['Fuel', 'link'], ['Transactions', 'link']], ['show fuel transactions']),
+    G('t', 'Set up the Telegram bot', [['Settings', 'link'], ['Integrations', 'link'], ['Settings'], ['Send salary statements to drivers', 'checkbox'], ['Save']], ['configure telegram bot', 'stop sending salary statements in Telegram']),
+    G('s', 'Send a settlement to a driver', [['Salary', 'link'], ['Send to driver'], ['Telegram', 'radio'], ['Send to driver']], ['send settlement to driver', 'send pay statement by telegram']),
+    G('d', "Change a trip's driver pay", [['Load + Trip', 'link'], ['Edit trip'], ['Driver pay *', 'spinbutton', 'type'], ['Save']], ['change driver pay', 'update trip pay', 'edit what the driver gets paid']),
+    G('r', "Change a load's rate", [['Load + Trip', 'link'], ['Edit load'], ['Load pay *', 'spinbutton', 'type'], ['Save load']], ['change the rate on a load', 'how do I update load pay', 'fix the price of a load']),
+  ];
+  const kg = set.map(x => x.guide);
+  const kf = set.flatMap(x => x.qs.map(q => ({ q, guide: x.guide.id, answer: null })));
+  const ix2 = B.instantIndex({ guides: kg, faq: kf, product: 'RoadLedger TMS' });
+  const M2 = q => B.instantMatch(ix2, q);
+  const sync = M2('Sync EFS fuel transactions');
+  check('"sync" never runs a guide that only uploads (even with a "sync …" FAQ wording)', !(sync.kind === 'guide' && sync.guide.id === 'u') && !(sync.suggest || []).some(g => g.id === 'u'), sync.top);
+  const tg = M2('Send a driver his settlement statement by Telegram');
+  check('"send … by Telegram" never runs the bot settings (a «Send …» checkbox is no send)', !(tg.kind === 'guide' && tg.guide.id === 't'), tg.top);
+  check('"send … by Telegram" runs the guide that presses «Send to driver»', tg.kind === 'guide' && tg.guide.id === 's', tg.top);
+  const pay = M2('Change the load pay on a load');
+  check('"change the load pay" never runs the driver-pay guide', !(pay.kind === 'guide' && pay.guide.id === 'd'), pay.top);
+  check('"change the load pay" runs the load-rate guide (its name names the load)', pay.kind === 'guide' && pay.guide.id === 'r', pay.top);
+  check('"change driver pay" still runs the driver-pay guide', M2('change driver pay').kind === 'guide' && M2('change driver pay').guide.id === 'd', M2('change driver pay').top);
+  check('"upload a fuel file" still runs the upload guide', M2('upload a fuel file').kind === 'guide' && M2('upload a fuel file').guide.id === 'u');
+  // buildFaq drops a wording whose operation the guide never performs; finishLearn drops a guide named after a tutorial
+  // whose operation it never performs.
+  const faqU = B.buildFaq([{ ...set[0].guide, questions: set[0].qs }]);
+  check('buildFaq: "sync fuel transactions" is dropped from the upload guide', faqU.length === 2 && !faqU.some(f => /sync/.test(f.q)), faqU.map(f => f.q));
+  const mapX = { views: [{ id: 'V1', kind: 'page', key: '/fuel', title: 'Fuel', controls: [{ ref: 'V1.1', role: 'button', name: 'Upload file', d: { sel: [] } }, { ref: 'V1.2', role: 'button', name: 'Sync', d: { sel: [] } }] }] };
+  const raw = { summary: 's', facts: [], guides: [
+    { name: 'How to Sync Your EFS Fuel Transactions', steps: [{ element_ref: 'V1.1', action: 'click', instruction: 'Click «Upload file»' }], questions: ['sync efs'] },
+    { name: 'Sync EFS fuel transactions', steps: [{ element_ref: 'V1.2', action: 'click', instruction: 'Click «Sync»' }], questions: ['sync efs fuel'] },
+  ] };
+  const finX = B.finishLearn([{ out: raw }], mapX, { docs: 'How to Sync Your EFS Fuel Transactions' });
+  check('finishLearn: a tutorial-named guide that never presses the tutorial\'s operation is dropped', finX.guides.length === 1 && finX.guides[0].name === 'Sync EFS fuel transactions', finX.guides.map(g => g.name));
+  check('finishLearn without docs keeps both', B.finishLearn([{ out: raw }], mapX).guides.length === 2);
+  // A guide never ends on «Clear <field>» (it stood in for a finishing control the explorer saw disabled): it stops
+  // before it and continues live; a «Cancel» at the end is dropped too, without making the guide live.
+  const mapC = { views: [{ id: 'V1', kind: 'page', key: '/batches/new', title: 'New batch', controls: [
+    { ref: 'V1.1', role: 'link', name: 'Batches', d: { sel: [] } }, { ref: 'V1.2', role: 'select', name: 'MC number', d: { sel: [] } },
+    { ref: 'V1.3', role: 'button', name: 'Clear MC number', commit: true, d: { sel: [] } }, { ref: 'V1.4', role: 'button', name: 'Cancel', d: { sel: [] } }] }] };
+  const gC = B.finishGuides({ guides: [
+    { name: 'Create a batch', steps: [{ element_ref: 'V1.1', action: 'click', instruction: 'Click «Batches»' }, { element_ref: 'V1.2', action: 'select', instruction: 'Pick the MC number' }, { element_ref: 'V1.3', action: 'click', instruction: 'Click «Clear MC number»' }] },
+    { name: 'Look at batches', steps: [{ element_ref: 'V1.1', action: 'click', instruction: 'Click «Batches»' }, { element_ref: 'V1.4', action: 'click', instruction: 'Click «Cancel»' }] },
+  ] }, mapC);
+  check('finishGuides: «Clear <field>» at the end is dropped and the guide is live', gC[0] && gC[0].steps.length === 2 && gC[0].live === true, gC[0]);
+  check('finishGuides: a bare «Cancel» at the end is dropped, the guide stays complete', gC[1] && gC[1].steps.length === 1 && gC[1].live === false, gC[1]);
+  // Equivalent answers: the same words in the name ("Send invoices to factoring" / "Send an invoice to factoring").
+  const ixE = B.instantIndex({ guides: [
+    { id: 'a', name: 'Send invoices to factoring', steps: [{ instruction: 'Click «Factoring»', action: 'click', target: T('Factoring') }, { instruction: 'Click «Send to factoring»', action: 'click', target: T('Send to factoring') }] },
+    { id: 'b', name: 'Send an invoice to factoring', steps: [{ instruction: 'Click «Invoices»', action: 'click', target: T('Invoices') }, { instruction: 'Click «Send to factoring»', action: 'click', target: T('Send to factoring', { role: 'menuitem' }) }] },
+  ], faq: [] });
+  const mE = B.instantMatch(ixE, 'send invoices to factoring');
+  check('two guides with the same name words are one answer', mE.kind === 'guide', mE.top);
+  // A vendor list of titles with one «vs.» line is still one workflow per line.
+  const dl = B.parseDocs(['How to Create Loads', 'How to Delete Loads', 'Amazon vs. Street Loads: How to Mark Loads as Delivered', 'How to Sync Your EFS Fuel Transactions', 'How to Send Invoices to Factoring Companies'].join('\n'));
+  check('parseDocs: a title list with one «vs.» line is one workflow per line', dl.length === 5 && dl[3].title === 'How to Sync Your EFS Fuel Transactions', dl.map(d => d.title));
+  // A participle names a state, not the act: "the remit notice printed on invoices" is no print request.
+  check('opsOf: participles are no operation', B.Instant.opsOf('Change the remit notice printed on invoices').size === 0 && B.Instant.opsOf('print the invoice').has('print'));
+}
+
 // ---------------- speed: 300 guides × 6 phrasings ----------------
 {
   const many = [], mfaq = [];
@@ -236,7 +298,24 @@ const small = { views: [
   check('deep plan: parts of about 30 guides', plan.parts.every(p => p.guides <= 45) && plan.parts.length >= 4, plan.parts.map(p => p.guides));
   check('deep plan: a dialog goes with its page', plan.parts.every(p => p.focus.filter(id => views.find(v => v.id === id).kind === 'dialog').every(id => p.focus.includes(views.find(v => v.id === id).parent) || !focus.includes(views.find(v => v.id === id).parent) || true)));
   const bodies = B.buildDeepLearn({ map, product: 'Big' });
-  check('deep: one body per part', bodies.length === plan.parts.length);
+  check('deep: one body per part (after twins are dropped)', bodies.length === B.deepPlan(B.learnViews(map)).parts.length, { bodies: bodies.length, parts: plan.parts.length });
+  {
+    // Twins: a second sample of a record page and the same menu on two tabs of a record are written once.
+    const row = { ref: 'x', role: 'button', name: 'More actions' };
+    const tw = { views: [
+      { id: 'V1', kind: 'page', key: '/a#/loads/create-load/booked/:id/DT-000171', title: 'Loads / DT-171', controls: [{ ref: 'V1.1', role: 'button', name: 'Dispatch', to: 'V3' }] },
+      { id: 'V2', kind: 'page', key: '/a#/loads/create-load/booked/:id/DT-000172', title: 'Loads / DT-172', controls: [{ ref: 'V2.1', role: 'button', name: 'Dispatch', to: 'V4' }] },
+      { id: 'V3', kind: 'dialog', parent: 'V1', key: 'k3', title: 'Assign', controls: [{ ...row, ref: 'V3.1' }] },
+      { id: 'V4', kind: 'dialog', parent: 'V2', key: 'k4', title: 'Assign', controls: [{ ...row, ref: 'V4.1' }] },
+      { id: 'V5', kind: 'page', key: '/a#/drivers/:id/detail', title: 'Driver', controls: [{ ref: 'V5.1', role: 'button', name: 'More actions for Joe', to: 'V7' }] },
+      { id: 'V6', kind: 'page', key: '/a#/drivers/:id/assets', title: 'Driver', controls: [{ ref: 'V6.1', role: 'button', name: 'More actions for Joe', to: 'V8' }] },
+      { id: 'V7', kind: 'panel', parent: 'V5', key: 'k7', title: 'More actions for Joe', controls: [{ ...row, ref: 'V7.1', name: 'Terminate' }] },
+      { id: 'V8', kind: 'panel', parent: 'V6', key: 'k8', title: 'More actions for Joe', controls: [{ ...row, ref: 'V8.1', name: 'Terminate' }] },
+    ] };
+    const lv = B.learnViews(tw);
+    check('twins: record samples and repeated menus dropped', lv.views.map(v => v.id).join(',') === 'V1,V3,V5,V6,V7', lv.views.map(v => v.id));
+    check('twins: a link to a dropped menu points at the kept one', lv.views.find(v => v.id === 'V6').controls[0].to === 'V7');
+  }
   check('deep: every part names its place among the others', bodies.every((b, i) => b.messages[0].content.includes(`part ${i + 1} of ${bodies.length}`)));
   const tiny = B.buildDeepLearn({ map, budget: 6000 });
   check('deep over budget: groups with their own map text, shared ones cached', tiny.length >= 4 && tiny.every(b => b.system.length === 3 && !!b.system[1].cache_control), tiny.map(b => b.system.length));

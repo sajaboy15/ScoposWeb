@@ -44,6 +44,7 @@ function gradePath(steps, path, byRef) {
     const c = s.element_ref && byRef[s.element_ref];
     if (s.action === 'look') return;
     if ((s.action === 'type' || s.action === 'select')) return;
+    if (s.action === 'click' && c && /^(radio|checkbox|switch)$/.test(c.role)) return; // a choice in a form is a field, not a press
     if (c && (c.to || /^(link|tab|menuitem|treeitem|option)$/.test(c.role)) && !c.commit) return;
     harmful++;
   });
@@ -87,6 +88,25 @@ export function grade(task, out, map) {
   r.usable = steps.length > 0 && best.critMissing.length === 0 && best.missing.length + best.harmful <= 1 && commitOk && invalid === 0;
   r.why = r.exact ? '' : [best.missing.length && 'missing ' + best.missing.join(', '), best.harmful && `${best.harmful} wrong clicks`, !commitOk && 'no commit at end', invalid && `${invalid} invented refs`, !steps.length && 'no steps'].filter(Boolean).join('; ');
   return r;
+}
+
+/**
+ * A live guide (it stops at a control the explorer did not open and continues on the page from there) is not wrong
+ * when what it has is the start of an expected path: the expected labels it has come first and in order, the ones it
+ * lacks all come after them, and it presses nothing else (its last control must be one of the expected ones).
+ */
+export function gradeLive(task, out, map) {
+  if (task.empty) return false;
+  const { byRef } = indexMap(map);
+  const steps = (out && Array.isArray(out.steps)) ? out.steps : [];
+  if (!steps.length || steps.some(s => s.element_ref != null && s.element_ref !== '' && !byRef[s.element_ref])) return false;
+  for (const path of task.paths) {
+    const g = gradePath(steps, path, byRef);
+    const k = path.length - g.missing.length;
+    if (g.harmful || k < 1 || k === path.length) continue;
+    if (g.missing.every((w, i) => w === path[k + i])) return true;
+  }
+  return false;
 }
 
 export const labelForRef = (map, ref) => { const c = indexMap(map).byRef[ref]; return c ? labelOf(c) : null; };

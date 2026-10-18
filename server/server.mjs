@@ -468,7 +468,7 @@ async function learnApi(req, res) {
     });
     const failed = outs.filter(o => o && o.error);
     if (failed.length) console.log(`[scopos] не написано частей: ${failed.length} (${[...new Set(failed.map(o => o.error))].join('; ').slice(0, 200)})`);
-    const fin = Brain.finishLearn(outs.filter(o => o && o.out), map);
+    const fin = Brain.finishLearn(outs.filter(o => o && o.out), map, { docs });
     const named = fin.guides.map((g, i) => ({ id: 'learned-' + (i + 1), name: String(g.name).slice(0, 90), learned: true, live: !!g.live, steps: g.steps, questions: g.questions || [] }));
     const faq = Brain.buildFaq(named, fin.facts);
     const guides = named.map(({ questions, ...g }) => g);

@@ -462,7 +462,10 @@ check('maskForm keeps the rest', T.maskForm('Пригласить коллегу
 T.setForms({ sdk: false, netBlocked: true });
 for (const u of ['/drivers/add', '/team/invite', '/loads/create', '/#/clients/add', '/loads/new'])
   check(`form route allowed with forms on: ${u}`, !T.unsafeAddress(u));
-for (const u of ['/cart/add?id=5', '/wishlist/add/5', '/items/5/delete/add', '/invites/5/accept', '/tickets/5/close', '/logout', '/loads/add?copy=5'])
+// SPA routes of real TMSs that name a record screen with a view verb glued to a noun (DataTruck-style)
+for (const u of ['/load-management/create-load/booked/4/DT-000004?crm_id=35&status=Booked&index=1', '/#/load-management/create-load/dispatched/8/DT-000008', '/hr-management/edit-driver/23/detail', '/accounting/invoices/batches/create-batch', '/accounting/invoices/batches/view-batch/149', '/#/accounting/salary/driver-settlements/batch-view/142'])
+  check(`record screen allowed with forms on: ${u}`, !T.unsafeAddress(u));
+for (const u of ['/cart/add?id=5', '/wishlist/add/5', '/items/5/delete/add', '/invites/5/accept', '/tickets/5/close', '/logout', '/loads/add?copy=5', '/product/5/add-to-cart', '/add-to-wishlist/5', '/create-and-send/5', '/edit-delete/5', '/posts/5/new-like'])
   check(`still refused with forms on: ${u}`, T.unsafeAddress(u));
 T.setForms({ sdk: false, netBlocked: false });
 check('form route refused with forms off: /drivers/add', T.unsafeAddress('/drivers/add'));
@@ -520,6 +523,45 @@ check('form route refused with forms off: /drivers/add', T.unsafeAddress('/drive
   check('map: row control has row: true and the generic label', rows[0] && rows[0].row === true && rows[0].rowLabel === 'Actions for load …' && rows[0].d.fp.rowOf.pre === 'actions for load');
   check('map: plain controls carry no row flag', !m.views[0].controls[0].row && !('rowLabel' in m.views[0].controls[0] && m.views[0].controls[0].rowLabel !== undefined));
   check('map: no internal row key leaks', !('rk' in rows[0]) && !('tw' in rows[0]));
+}
+// 10h. items of a menu that makes something ("Create Truck ▾" → "Manual entry"): pressed like form openers, only with
+// the net block; their whole text through the full veto; never in a menu that does not make, never a link item.
+{
+  const menuWith = (label, items) => {
+    const box = el('ul', { role: 'menu', 'aria-label': label }, items.map(([attrs, t]) => el('li', { role: 'none' }, [el(attrs.href ? 'a' : 'button', { role: 'menuitem', ...(attrs.href ? {} : { type: 'button' }), ...attrs }, t, doc)], doc)), doc);
+    box.parentElement = doc.body;
+    return box.querySelectorAll('[role=menuitem]');
+  };
+  const [manual, upload, imp, del, send, link] = menuWith('Create Truck', [[{ 'data-act': 'truck-manual' }, 'Manual entry'], [{ 'data-act': 'truck-upload' }, '* Upload Truck registration'],
+    [{ 'data-act': 'amazon-import' }, 'Import Amazon loads (CSV)'], [{}, 'Delete truck'], [{}, 'Send to driver'], [{ href: '#/trucks/new' }, 'Manual entry']]);
+  T.setForms({ sdk: false, netBlocked: false });
+  check('make-menu item NOT pressed without the net block', !S.explore.pressable(manual), pressKindOf(manual));
+  T.setForms({ sdk: false, netBlocked: true });
+  check('make-menu item "Manual entry" pressed as a form opener with the net block', pressKindOf(manual) === 'form', pressKindOf(manual));
+  check('make-menu item "Upload Truck registration" is a dialog opener by design', pressKindOf(upload) === 'form');
+  for (const [x, t] of [[imp, 'Import Amazon loads (CSV)'], [del, 'Delete truck'], [send, 'Send to driver']]) check(`make-menu item refused by the veto: ${t}`, !S.explore.pressable(x), pressKindOf(x));
+  check('make-menu link item is followed by address, not pressed', pressKindOf(link) !== 'form');
+  const [other] = menuWith('Bulk actions', [[{}, 'Manual entry']]);
+  check('item of a menu that does not make anything is not pressed', !S.explore.pressable(other), pressKindOf(other));
+  const [more] = menuWith('More ways to create a load', [[{}, 'Manual entry']]);
+  check('a make word inside the menu label counts ("More ways to create a load")', pressKindOf(more) === 'form');
+  const [risky] = menuWith('Create and send', [[{}, 'Manual entry']]);
+  check('a menu whose label the veto refuses makes nothing ("Create and send")', !S.explore.pressable(risky), pressKindOf(risky));
+  const [inDlg] = (() => { const items = menuWith('Create load', [[{}, 'Manual entry']]); const d = el('div', { role: 'dialog' }, [], doc); const m = items[0].parentElement.parentElement; m.parentElement = d; d.parentElement = doc.body; return items; })();
+  check('make-menu item inside a dialog is not pressed (a dialog only gets its tabs pressed)', pressKindOf(inDlg) !== 'form', pressKindOf(inDlg));
+}
+// 10i. a row's selection checkbox is not a form field: Sort / Copy / Export next to it are no commits
+{
+  const row = (btn) => {
+    const cb = el('input', { type: 'checkbox', 'aria-label': 'Select transaction INV1' }, [], doc);
+    const b = el('button', { type: 'button' }, btn, doc);
+    const td1 = el('td', {}, [cb], doc), td2 = el('td', {}, [b], doc);
+    const tr = el('tr', {}, [td1, td2], doc), tbody = el('tbody', {}, [tr], doc), table = el('table', {}, [tbody], doc), card = el('div', {}, [table], doc);
+    card.parentElement = doc.body;
+    return b;
+  };
+  for (const t of ['Copy card number', 'Export', 'Sort by Date']) check(`"${t}" next to a row checkbox is not a commit`, !T.commitOf(row(t)));
+  check('"Save" next to a real field is still a commit', T.commitOf(boxWith({ type: 'button' }, 'Save')));
 }
 T.setForms({ sdk: false, netBlocked: false });
 

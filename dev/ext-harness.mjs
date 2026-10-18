@@ -80,7 +80,17 @@ export async function launch({ headed = !!process.env.SCOPOS_HEADED, width = 128
     for (let i = 0; i < 50; i++) {
       const { targetInfos } = await send('Target.getTargets');
       const t = targetInfos.find(x => x.type === 'service_worker' && x.url.startsWith(`chrome-extension://${extId}/`));
-      if (t) { const { sessionId } = await send('Target.attachToTarget', { targetId: t.targetId, flatten: true }); await send('Runtime.enable', {}, sessionId); return sessionId; }
+      if (t) {
+        const { sessionId } = await send('Target.attachToTarget', { targetId: t.targetId, flatten: true });
+        await send('Runtime.enable', {}, sessionId);
+        // A worker that is still starting has no `chrome` yet: wait for it instead of failing the first call.
+        for (let k = 0; k < 40; k++) {
+          const r = await send('Runtime.evaluate', { expression: 'typeof chrome !== "undefined" && !!chrome.runtime && !!chrome.runtime.id', returnByValue: true }, sessionId).catch(() => null);
+          if (r && r.result && r.result.value === true) return sessionId;
+          await sleep(150);
+        }
+        return sessionId;
+      }
       await sleep(100);
     }
     throw new Error('extension worker not found');

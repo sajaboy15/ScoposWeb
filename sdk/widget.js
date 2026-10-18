@@ -400,6 +400,41 @@ input:focus-visible { outline: none; }
     const VIEW = /^(show|view|see|look|open|display|list|покаж|показ|посмотр|смотр|открой|откр|глян|список)/;
     const HARD = new Set(['delete', 'cancel', 'off']);
     const actOf = w => { for (const [k, re] of ACTS) if (re.test(w)) return k; return VIEW.test(w) ? 'view' : null; };
+    // Operations with a button of their own. A question that names one runs only a guide that performs it: its name
+    // or a control it presses says so ("Sync" is not "Upload file"; "Send to driver" is not the bot's settings with a
+    // "Send salary statements" checkbox). FAQ wordings don't count: a tutorial title can land on the wrong guide.
+    const OPS = [
+      ['send', /^(send|sent|отправ|пошл|перешл|пересла)/],
+      ['sync', /^(sync|synchron|синхрон)/],
+      ['import', /^(import|upload|импорт|загруз)/],
+      ['export', /^(export|download|экспорт|выгруз|скача)/],
+      ['print', /^(print|печат|распечат)/],
+      ['share', /^(share|sharing|подел|расшар)/],
+      ['split', /^(split)/],
+      ['copy', /^(copy|copie|duplicat|clon|копи|дублир)/],
+      ['recalc', /^(recalc|пересчит|пересчет)/],
+      ['terminate', /^(terminat|уволь|уволит|увольн)/],
+      ['merge', /^(merg|объедин)/],
+      ['mark', /^(mark|marks|marked|marking)$|^(отмет|помет)/],
+    ];
+    // A participle names a state, not the act asked for ("the remit notice printed on invoices", «отправленные счета»).
+    const PARTICIPLE = /^[a-z]+ed$|^sent$|^[а-я]+(?:енн|анн|ённ|ящ|ющ|ащ|ущ|вш)[а-я]*$/;
+    const opOf = w => { if (PARTICIPLE.test(w)) return null; for (const [k, re] of OPS) if (re.test(w)) return k; return null; };
+    // Controls a guide presses (not the fields and checkboxes it fills): what it does, as operations.
+    const PRESS = /^(button|link|menuitem|tab|treeitem|option|row|gridcell)$/;
+    function opsOf(text) {
+      const out = new Set();
+      for (const x of words(text)) { const k = opOf(x.w); if (k) out.add(k); }
+      return out;
+    }
+    /** The operations a guide performs: in its name, and on the controls it presses. pressedOnly: not the name. */
+    function guideOps(g, pressedOnly) {
+      const out = pressedOnly ? new Set() : opsOf(g && g.name);
+      for (const s of (g && Array.isArray(g.steps) ? g.steps : [])) {
+        if (s && s.action === 'click' && s.target && typeof s.target.text === 'string' && (!s.target.role || PRESS.test(s.target.role))) opsOf(s.target.text).forEach(k => out.add(k));
+      }
+      return out;
+    }
     const WORD = /[$€₽#]?[\p{L}\p{N}](?:[\p{L}\p{N}@.,:/+'’_-]*[\p{L}\p{N}])?/gu;
     const EN_SUF = [['ations', ''], ['ation', ''], ['ments', ''], ['ment', ''], ['ings', ''], ['ing', ''], ['ies', 'y'], ['ied', 'y'], ['ers', ''], ['er', ''], ['ed', ''], ['es', ''], ['ly', ''], ['s', '']];
     const RU_SUF = ['иями', 'ями', 'ами', 'ией', 'ого', 'его', 'ому', 'ему', 'ыми', 'ими', 'ость', 'ости', 'ться', 'тся', 'ешь', 'ете', 'ите', 'ает', 'яет', 'ует', 'ала', 'ила', 'ыла', 'ать', 'ять', 'ить', 'еть', 'уть', 'ой', 'ей', 'ий', 'ый', 'ая', 'яя', 'ое', 'ее', 'ые', 'ие', 'ую', 'юю', 'ом', 'ем', 'ам', 'ям', 'ах', 'ях', 'ов', 'ев', 'ия', 'ья', 'ии', 'ью', 'а', 'я', 'о', 'е', 'и', 'ы', 'у', 'ю', 'ь', 'й'].sort((a, b) => b.length - a.length);
@@ -574,7 +609,7 @@ input:focus-visible { outline: none; }
       const T = [], byId = new Map();
       for (const g of Array.isArray(guides) ? guides : []) {
         if (!g || g.id == null || typeof g.name !== 'string' || !g.name.trim() || !Array.isArray(g.steps) || !g.steps.length || byId.has(String(g.id))) continue;
-        const t = { kind: 'guide', guide: g, texts: [g.name], field: [], labels: [] };
+        const t = { kind: 'guide', guide: g, texts: [g.name], field: [], labels: [], ops: guideOps(g) };
         for (const s of g.steps) {
           if (!s) continue;
           if (s.target && typeof s.target.text === 'string') { t.field.push(s.target.text); t.labels.push(s.target.text); }
@@ -623,6 +658,7 @@ input:focus-visible { outline: none; }
         t.labelStems = t.labels.map(x => tk(String(x).replace(/[*()]/g, ' '))).filter(l => l.length && l.length <= 4);
         t.acts = new Set(ws.flatMap(w => [...actsOf(w, true)]));
         t.nameActs = actsOf(ws[0]);
+        t.nameView = actsOf(ws[0], true).has('view');
         t.hard = t.kind === 'guide' ? new Set([...t.nameActs].filter(k => HARD.has(k))) : new Set();
         if (t.kind === 'guide') {
           // What the guide ends on and which fields it fills: two guides alike in both are the same task.
@@ -664,19 +700,23 @@ input:focus-visible { outline: none; }
     }
 
     // ---- matching ----
-    const SURE = 0.7, EXPLAINED = 0.9, MARGIN = 0.1, SUGGEST = 0.45;
+    const SURE = 0.7, EXPLAINED = 0.9, MARGIN = 0.1, SUGGEST = 0.45, NAME_EDGE = 0.2, NAME_EXTRA = 0.25;
     // A question about a value ("what plan are we on", «сколько счетов ждут оплаты»): a fact answers it. Anything else
     // ("how do I…", a command) is a task: only guides compete.
     const VALUE_Q = /^(what|whats|which|who|whose|when|is|are|was|were|do|does|did|have|has|how (many|much|long|big|often))\b|^(какой|какая|какое|какие|каков|какова|сколько|кто|когда|чей|чья|есть ли)(?![\p{L}])|(^|\s)ли(?![\p{L}])/u;
     // Two guides that end on the same control and fill mostly the same fields are one answer (the same task from two
     // screens); so is a guide that stops at the opener (live, no fields) and one that goes on through the form.
+    // So are two guides with the same words in their names ("Send invoices to factoring" from the list, "Send an
+    // invoice to factoring" from a row's menu), and one whose fields are all among the other's ("Change a load's rate"
+    // and "Edit load details (… Pay)": the same «Edit load» form).
     function equivalent(a, b) {
+      if (a.name && b.name && a.name.length && a.name.length === b.name.length && a.name.every(s => b.name.some(t => same(s, t)))) return true;
       if (!a.end || a.end !== b.end) return false;
       const x = a.fields, y = b.fields;
       if (!x.size || !y.size) return (!x.size && !y.size) || (!x.size ? a.live : b.live) === 1;
       let both = 0;
       x.forEach(f => { if (y.has(f)) both++; });
-      return both / (x.size + y.size - both) >= 0.5;
+      return both / (x.size + y.size - both) >= 0.5 || both === Math.min(x.size, y.size);
     }
     function match(ix, question, debug) {
       const none = { kind: 'none', suggest: [], score: 0, top: [] };
@@ -716,6 +756,27 @@ input:focus-visible { outline: none; }
       C.forEach(q => { q.M.forEach(v => QM.add(v)); q.S.forEach(v => QS.add(v)); });
       const valueQ = VALUE_Q.test(low(String(question)).trim());
       const qActs = actsOf(qw);
+      const qOps = new Set(C.map(q => opOf(q.w)).filter(Boolean));
+      const qView = actsOf(qw, true).has('view');
+      // How much of the question (its words other than the action) a guide's own name says.
+      const plainC = C.filter(q => !q.act), plainSum = plainC.reduce((n, q) => n + q.idf, 0) || 1;
+      const nameCov = t => {
+        let c = 0;
+        for (const q of plainC) { if (t.name.some(s => q.M.has(s))) c += q.idf; else if (t.name.some(s => q.S.has(s))) c += 0.8 * q.idf; }
+        return c / plainSum;
+      };
+      // How much of a guide's own name (its words other than the action) the question does not say: «Change a trip's
+      // driver pay» names a trip and a driver that "change the load pay" never mentions.
+      const nameExtra = t => {
+        let all = 0, out = 0;
+        for (const s of t.name) {
+          if (actOf(s)) continue;
+          const w = Math.log((ix.N + 1) / ((ix.df.get(s) || 0) + 0.5));
+          all += w;
+          if (!QM.has(s) && !QS.has(s)) out += w;
+        }
+        return all ? out / all : 0;
+      };
       // A field name counts for a guide only when it is a slot the user fills ("phone 555-0142", "120 gallons") or
       // the whole label of one of its controls ("billing email", "dry van"): "address" alone is not "Street address".
       const valAt = new Set(qw.filter(x => x.num).map(x => x.n));
@@ -783,6 +844,7 @@ input:focus-visible { outline: none; }
         }
         for (const k of qa) if (!t.acts.has(k) || (HARD.has(k) && !t.nameActs.has(k))) return true;
         for (const k of t.hard) if (!qa.has(k)) return true;
+        if (t.kind === 'guide') for (const k of qOps) if (!t.ops.has(k)) return true;
         return false;
       };
       // Two facts that tie and give the same numbers are one answer (the dashboard and the list both say "3 of 15").
@@ -796,13 +858,30 @@ input:focus-visible { outline: none; }
       const plausible = s => s.score >= SURE && s.explained >= EXPLAINED && !s.missing;
       const pick = pool => {
         const P = pool.filter(plausible);
-        const b = P[0];
+        let b = P[0];
         if (!b || unknown > 0.1) return null;
         if (head12.some(s => s.clash && s.t.kind === b.t.kind && s.score > b.score && plausible(s))) return null;
         // A rival whose name lacks the question's action word while b's name has it is no rival ("edit a load" vs
         // "See a load's history").
         const named = s => [...qActs].every(k => s.t.nameActs.has(k));
-        const rivals = P.slice(1).filter(s => b.score - s.score < MARGIN && !(named(b) && !named(s)));
+        // The object must be the question's. A guide whose name says clearly more of the question's own words, and no
+        // action the question lacks, is the better answer ("update the rate on a load": «Change a load's rate» over
+        // «Edit a load»); when it does not explain the question well enough to run, b is only a guess ("change the
+        // load pay": b «Change a trip's driver pay», while «Edit load details (… Pay)» names the load and the pay).
+        const cov = new Map(), nc = s => { if (!cov.has(s)) cov.set(s, s.t.kind === 'guide' ? nameCov(s.t) : 0); return cov.get(s); };
+        const own = s => s.t.kind === 'guide' && [...s.t.nameActs].every(k => qActs.has(k)) && (!s.t.nameView || qView);
+        // Only when b's name says something the question does not («Create a new invoice batch» for "create an invoice
+        // batch for delivered loads" says nothing extra, and «Add a load to an invoice batch» is no better for it).
+        const xb = b.t.kind === 'guide' ? nameExtra(b.t) : 0;
+        if (b.t.kind === 'guide' && !b.exact && xb > NAME_EXTRA) {
+          const nb = nc(b);
+          const says = s => s !== b && own(s) && nc(s) >= nb + NAME_EDGE && !equivalent(b.t, s.t);
+          const better = P.filter(s => says(s) && nameExtra(s.t) < xb).sort((x, y) => nc(y) - nc(x) || y.score - x.score);
+          if (better.length) b = better[0];
+          else if (pool.some(s => says(s) && !plausible(s) && s.score >= SUGGEST && s.R >= b.R - 0.15)) return null;
+        }
+        const nameBeats = s => b.t.kind === 'guide' && nc(b) >= nc(s) + NAME_EDGE;
+        const rivals = P.filter(s => s !== b && b.score - s.score < MARGIN && !(named(b) && !named(s)) && !nameBeats(s));
         if (!rivals.length) return b;
         if (b.exact && rivals.every(s => !s.exact)) return b;
         if (rivals.every(s => agree(b, s))) return b;
@@ -824,7 +903,7 @@ input:focus-visible { outline: none; }
       const suggest = guides.filter(s => s.score >= SUGGEST).slice(0, 3).map(s => s.t.guide);
       return { kind: suggest.length ? 'suggest' : 'none', suggest, score: ok[0] ? ok[0].score : 0, top, ...dbg };
     }
-    return { index, match, fill, safeValue, words, stem };
+    return { index, match, fill, safeValue, words, stem, opsOf, guideOps };
   })();
   // ==== instant answers: end ====
   const norm = s => String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}\s]/gu, ' ').replace(/\s+/g, ' ').trim();

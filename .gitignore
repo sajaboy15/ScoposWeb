@@ -5,3 +5,4 @@ node_modules/
 *.lnk
 .scopos-answers.local.json
 .scopos-usage.local.json
+dev/eval/out/

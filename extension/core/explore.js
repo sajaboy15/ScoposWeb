@@ -79,7 +79,7 @@
 
   // bytes: UTF-8 size of the saved walk state. It goes to chrome.storage.session (10 MB for the whole extension,
   // shared with the guide sessions) or the SDK's sessionStorage (~5 M characters), once per press.
-  const LIMITS = { views: 150, extra: 250, probes: 700, perView: 30, controls: 150, regions: 4, ms: 15 * 60 * 1000, step: 8000, bytes: 4e6 };
+  const LIMITS = { views: 150, extra: 250, probes: 700, perView: 30, controls: 150, regions: 4, ms: 15 * 60 * 1000, step: 8000, bytes: 3e6 };
 
   // ---------------- what is risky ----------------
   const B = '(?<![\\p{L}\\p{N}])'; // start of a word (\b does not work for Cyrillic)
@@ -288,8 +288,12 @@
   // Collection nouns (deployments, transfers, subscribers, uploads, publishing …) name screens; verbs in addresses are bare.
   const collection = t => t.length >= 5 && ((/s$/.test(t) && !/(?:ss|us|is)$/.test(t)) || /ing$/.test(t));
 
-  /** Is following this address unsafe (it acts instead of showing a page)? Pure: no DOM needed. */
-  function isDangerAddress(href) {
+  // Verbs that, in an SPA route, name the screen that shows a record or a form, never the act itself:
+  // /load-management/create-load/booked/4/DT-000004, /hr-management/edit-driver/23/detail, /batches/create-batch.
+  // Allowed in page addresses only while writes are blocked below the page (form openers on).
+  const VIEW_VERBS = new Set(['create', 'new', 'add', 'edit', 'view', 'open', 'show', 'detail', 'details', 'preview']);
+  /** Is following this address unsafe (it acts instead of showing a page)? Pure: no DOM needed. allow: verbs to accept. */
+  function isDangerAddress(href, allow) {
     let u;
     try { u = new URL(href, typeof location !== 'undefined' && location.href ? location.href : 'http://scopos.invalid/'); } catch (e) { return true; }
     let tail = u.pathname + u.search + u.hash;
@@ -305,9 +309,18 @@
     }
     if (q.some(([k]) => ACTION_KEY.test(k))) return true;
     const parts = segs.concat(...q);
-    if (parts.some(p => actionPart(p))) return true;
-    // The full verb list over the words of the address, collection nouns aside.
-    const ws = parts.map(p => dnorm(p).split(' ').filter(t => t && !/^\d+$/.test(t) && !collection(t)).join(' ')).filter(Boolean).join(' · ');
+    // A view verb counts as a screen name only inside a compound segment (create-load, edit-driver, view-batch):
+    // a bare /add/5 or /wishlist/add acts on GET in many shops.
+    // The noun after the verb must name a record or a screen: add-to-cart, new-like, create-and-send act.
+    const ACTS = /^(?:to|and|cart|basket|bag|wishlist|favou?rites?|fav|likes?|vote|follow|subscribe|bookmark|star|order|checkout|payment|pay|send|delete|remove|post|publish|approve|accept|reject|confirm|submit)$/;
+    const own = p => {
+      if (!allow) return null;
+      const t = dnorm(p).split(' ').filter(Boolean);
+      return t.length >= 2 && allow.has(t[0]) && !t.slice(1).some(x => ACTS.test(x)) ? allow : null;
+    };
+    if (parts.some(p => actionPart(p, own(p)))) return true;
+    // The full verb list over the words of the address, collection nouns (and allowed view verbs) aside.
+    const ws = parts.map(p => dnorm(p).split(' ').filter(t => t && !/^\d+$/.test(t) && !collection(t) && !(own(p) && own(p).has(t))).join(' ')).filter(Boolean).join(' · ');
     return isDangerText(ws);
   }
 
@@ -481,6 +494,9 @@
   function isField(f) {
     if (ours(f) || !shown(f)) return false;
     if (f.closest('[role=search],[role=toolbar],search')) return false;
+    // A row's selection checkbox (or "select all" in the header) picks records for the toolbar: Sort, Copy and
+    // Export next to it do not finish a form.
+    if ((/^(checkbox|radio)$/i.test(f.getAttribute('type') || '') || /^(checkbox|radio)$/.test(f.getAttribute('role') || '')) && f.closest('tr,[role=row],thead,th,[role=columnheader],[role=gridcell]')) return false;
     return ![f.getAttribute('type'), f.getAttribute('name'), f.id, f.getAttribute('placeholder'), f.getAttribute('aria-label')].some(v => v && SEARCHY.test(v));
   }
   // Remembered for 400 ms: one capture asks about the same few boxes for every button in them.
@@ -520,6 +536,7 @@
   function commitOf(el, name) {
     if (!el || el.nodeType !== 1 || ours(el) || !buttonLike(el)) return false;
     if (TOGGLE_ROLE.test(roleOf(el)) || el.hasAttribute('aria-pressed') || el.hasAttribute('aria-checked')) return false;
+    if (roleOf(el) === 'tab') return false; // «Assign Driver» tab in a dialog switches its panel
     const popup = el.getAttribute('aria-haspopup');
     if ((popup && popup !== 'false') || el.hasAttribute('aria-expanded')) return false; // a menu trigger
     const label = name !== undefined ? name : S.labelOf ? S.labelOf(el) : String(el.textContent || '');
@@ -531,6 +548,9 @@
     const dlg = el.closest(DIALOG);
     if (!dlg && !fieldScope(el)) return false;
     if (/filter|фильтр|reset view/i.test(label)) return false; // "Clear filters" next to filter fields resets a list
+    // «Clear MC number»: the × of one field empties it; it finishes nothing.
+    const clr = /^(?:clear|очистить)\s+(.+)$/i.exec(String(label).trim());
+    if (clr) { const box = dlg || fieldScope(el); if (box && [...box.querySelectorAll(FIELD_SEL)].some(f => isField(f) && norm(S.labelOf ? S.labelOf(f) : '').replace(/\s*\*$/, '') === norm(clr[1]))) return false; }
     const verb = formVerb(label);
     const first = dnorm(label).split(' ')[0];
     // "+ Add stop" (a stop is a noun here) adds a row next to fields: an opener verb that does not finish a form
@@ -587,6 +607,39 @@
     // Only the opener verb is excused: everything else the element says goes through the full veto.
     if (isDangerText(maskForm(textOf(el), label)) || DANGER_CLASS.test(classOf(el)) || fwCheck(el, true)) return false;
     return true;
+  }
+
+  // A label that names making something: it starts with a make verb («Создать грузовик», "Create Truck") or has
+  // one among its first words ("More ways to create a load"), and the veto excuses nothing else in it.
+  const FORM_MAKE_SET = new Set(FORM_MAKE.map(fold));
+  function makeLabel(label) {
+    const words = dnorm(label).split(' ').filter(Boolean);
+    if (!words.length || !formLabelOk(label)) return false;
+    return formVerb(label) === 'make' || words.slice(0, 5).some(w => FORM_MAKE_SET.has(w) && !FORM_NAV_SET.has(w) && !DIALOG_VERB.has(w));
+  }
+  // The control that opened this menu: the one that points at it, else the only expanded popup trigger.
+  function menuTrigger(menu) {
+    const id = menu.id;
+    if (id) for (const t of document.querySelectorAll('[aria-controls],[aria-owns]')) if (`${t.getAttribute('aria-controls') || ''} ${t.getAttribute('aria-owns') || ''}`.split(/\s+/).includes(id)) return t;
+    const by = (menu.getAttribute('aria-labelledby') || '').split(/\s+/)[0];
+    const lb = by ? document.getElementById(by) : null;
+    if (lb && lb !== menu && !menu.contains(lb)) return lb;
+    const open = [...document.querySelectorAll('[aria-expanded=true][aria-haspopup]:not([aria-haspopup=false])')].filter(x => !ours(x) && !menu.contains(x));
+    return open.length === 1 ? open[0] : null;
+  }
+  /**
+   * An item of a menu that makes something ("Create Truck ▾" → "Manual entry", "Create new" → "New load"): pressed
+   * like a form opener, only while writes are blocked below the page (the caller checks formsOn). The menu (its
+   * own label, or its trigger's) must name making something; the item's whole text, attributes and handlers went
+   * through the full veto already, with nothing excused ("Upload Truck registration", "Import CSV" stay unpressed).
+   */
+  function makeMenuItem(el) {
+    if (el.tagName === 'A' && el.hasAttribute('href') && !buttonAnchor(el)) return false; // a link: followed by address
+    const menu = el.closest('[role=menu]');
+    if (!menu || el.closest(DIALOG) || el.hasAttribute('aria-haspopup') || commitOf(el) || fwCheck(el, true)) return false;
+    if (makeLabel(menu.getAttribute('aria-label') || '')) return true;
+    const t = menuTrigger(menu);
+    return !!t && makeLabel(S.labelOf ? S.labelOf(t) : t.textContent);
   }
 
   const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -701,6 +754,7 @@
     const popup = el.getAttribute('aria-haspopup');
     if (popup && popup !== 'false') return popup === 'dialog' && commitOf(el) ? null : 'menu';
     if (el.hasAttribute('aria-expanded') || el.hasAttribute('aria-controls')) return 'disclosure';
+    if (role === 'menuitem' && !form && formsOn && makeMenuItem(el)) return 'form'; // "Create Truck ▾ → Manual entry"
     if (role !== 'button') return form ? 'form' : null; // menu items and tree items act; only their submenus open
     if (OPENER.test(norm(label)) && !commitOf(el)) return 'opener';
     // Everything else («Пригласить коллегу», «Сменить тариф», Watch, Follow …) is pressed only as a form opener,
@@ -733,20 +787,31 @@
     return u.href;
   }
 
-  // Queue the page a link leads to. Record lists (/invoices/1, /invoices/2 …) give at most two samples per route.
-  function linkView(a) {
+  // Queue the page a link leads to. Record lists (/invoices/1, /invoices/2 …) give at most two samples per route:
+  // the first one early (rec 1: its forms are what guides need), the second at the end (rec 2, st.later).
+  // from: the view the link is on; a tab link of a record page (a driver's «Documents» tab) is entered early too.
+  function linkView(a, from) {
     const href = safeHref(a);
     if (!href) return null;
     const key = pageKey(href);
     if (st.views[key]) return st.views[key];
     const hot = !!a.closest(CHROME);
     const last = (key.split(/[?#]/)[0].split('/').pop() || '');
+    let rec = 0;
     if (!hot && (/\d|:id/.test(last) || a.closest(ROWS))) {
-      const shape = key.replace(/\/[^/?#]*(?=$|[?#])/, '/*');
+      // The record's own segment becomes *: the last one of the hash route when there is one (#/loads/:id/DT-1),
+      // else of the path. One shape per kind of record page, two samples each.
+      const hi = key.indexOf('#');
+      const shape = hi >= 0 ? key.slice(0, hi) + key.slice(hi).replace(/\/[^/?#]*(?=$|\?)/, '/*') : key.replace(/\/[^/?#]*(?=$|[?#])/, '/*');
       st.shapes[shape] = (st.shapes[shape] || 0) + 1;
       if (st.shapes[shape] > 2) return null;
+      rec = st.shapes[shape];
     }
-    return addView(key, cleanUrl(href), 'page', undefined, hot, href);
+    const rtab = !hot && !rec && from && from.kind === 'page' && (from.rec === 1 || from.rtab) && roleOf(a) === 'tab';
+    const v = addView(key, cleanUrl(href), 'page', undefined, rec === 2 ? 'later' : hot, href);
+    if (v && rec) v.rec = rec;
+    if (v && rtab) v.rtab = 1;
+    return v;
   }
 
   // ---------------- dialogs ----------------
@@ -1025,7 +1090,7 @@
     try { w = decodeURIComponent(w); } catch (e) { /* keep */ }
     return FORM_ROUTE.has(dnorm(w)) && !isDangerAddress(rest);
   }
-  const unsafeAddress = h => isDangerAddress(h) && !formRoute(h);
+  const unsafeAddress = h => isDangerAddress(h, formsOn ? VIEW_VERBS : null) && !formRoute(h);
 
   // A screen reached by a press or a redirect at an address that acts (/items/5/archive, /cart/add?id=5):
   // kept as a title only, never queued, never navigated to again.
@@ -1041,7 +1106,8 @@
 
   /**
    * check: the full address to safety-check (before cleanUrl drops its query); false only for the start page,
-   * which the user opened themselves.
+   * which the user opened themselves. hot: true (navigation: st.hot), 'later' (a second record sample: st.later),
+   * else the content queue.
    */
   function addView(key, url, kind = 'page', parent, hot, check) {
     if (st.views[key]) return st.views[key];
@@ -1058,7 +1124,7 @@
     }
     const v = { id: 'V' + ++st.n.ids, key, url, kind, parent };
     st.views[key] = v;
-    if (kind === 'page') (hot ? st.hot : st.queue).push(key);
+    if (kind === 'page') (hot === 'later' ? st.later : hot ? st.hot : st.queue).push(key);
     return v;
   }
 
@@ -1084,6 +1150,9 @@
   function control(v, x, i, inner, d, kinds, snap) {
     if (d === undefined) { try { d = S.describe(x.el); } catch (e) { d = null; } }
     d = d ? slim(d) : null;
+    // Every control of a view is described at the same address: it is kept once on the view (v.dpath) and put back
+    // in the map (controlOut). A tenth of the walk state on a big product.
+    if (d && d.path) { if (v.dpath === undefined) v.dpath = d.path; if (d.path === v.dpath) delete d.path; }
     const c = { ref: `${v.id}.${i + 1}`, role: x.role, name: x.name, section: x.section, state: x.state, d };
     if (x.options !== undefined) c.options = x.options;
     try {
@@ -1106,18 +1175,24 @@
     // one key per view: the row key above, else role, section and the leading opener word. Pressed once; the others
     // share where it led.
     if (c.rk) c.tw = c.rk;
-    else if (x.el.closest(ROW_SEL + ',[draggable=true]')) {
+    else if (x.el.closest(ROW_SEL + ',[draggable=true]') && !x.el.closest('[role=menu],[role=menubar]')) { // a menu's items are not records
       const first = dnorm(x.name).split(' ')[0] || '';
       c.tw = `${x.role}|${x.section || ''}|row|${FORM_WORDS.has(first) ? first : '#'}`;
-    } else if (x.el.getAttribute('aria-haspopup') === 'dialog' && !formVerb(x.name)) {
+    } else if (x.el.getAttribute('aria-haspopup') === 'dialog' && !formVerb(x.name) && /[0-9]|…/.test(x.name || '')) {
       // Record cards that open a record dialog (a dispatch board's load chips): one per class of card.
       c.tw = `${x.role}|${x.section || ''}|card|${classOf(x.el).trim().split(/\s+/)[0] || ''}`;
     }
     if (x.el.tagName === 'A' && x.el.hasAttribute('href')) {
-      const t = linkView(x.el);
+      const t = linkView(x.el, v);
       if (t) c.to = t.key;
       c.probe = !inner && kindIn(kinds, x.el) ? undefined : 'link';
-    } else c.probe = !inner && !v.blocked && kindIn(kinds, x.el) ? undefined : 'skip';
+    } else {
+      // Inside a dialog only its tabs are pressed («Create New Load» → «Manual entry»): the dialog is entered again
+      // for them (enterPanel), and what a tab shows is captured, never pressed.
+      const tabIn = inner && v.kind === 'dialog' && x.role === 'tab' && x.el.getAttribute('aria-selected') !== 'true';
+      const k = (!inner || tabIn) && !v.blocked && kindIn(kinds, x.el);
+      c.probe = k && (!inner || k === 'tab') ? undefined : 'skip';
+    }
     return c;
   }
 
@@ -1160,9 +1235,12 @@
   function pick(list, kinds) {
     if (list.length <= LIMITS.controls) return list;
     const seen = {};
+    // Counted per table or list: the sidebar's <li> links must not use up the record links of the data table.
+    const boxes = new Map();
+    const boxOf = el => { const b = el.closest('table,[role=grid],[role=table],[role=treegrid],ul,ol,[role=list],[role=listbox]') || el.closest(ROW_SEL).parentElement; if (!boxes.has(b)) boxes.set(b, boxes.size); return boxes.get(b); };
     const repeat = x => {
       if (!x.el.closest(ROW_SEL)) return false;
-      const k = `${x.role}|${x.role === 'link' ? '*' : x.name}`;
+      const k = `${boxOf(x.el)}|${x.role}|${x.role === 'link' ? '*' : x.name}`;
       seen[k] = (seen[k] || 0) + 1;
       return seen[k] > 2;
     };
@@ -1427,12 +1505,54 @@
     st.fitAt = st.n.ids;
     if (size() <= LIMITS.bytes) return;
     const views = Object.values(st.views).filter(v => v.controls);
+    const fpCut = (c, f) => { if (c.d && c.d.fp) f(c.d.fp); };
+    // The header and navigation repeat on every screen with the same descriptor: their context features are kept
+    // on the first screen only (the locator scores what is there and skips what is missing).
+    const firstHot = new Set();
+    // What guides are written from is cut last: fields, commits, openers and controls that lead somewhere.
+    // Sort and filter headers and row repeats are cut first, even when not pressed yet (they wait for phase 2); a
+    // record's own buttons («Mark as In-Transit», «Sync») stay: users ask for them.
+    const needed = c => c.commit || c.to || c.probe === 'pressed' || FIELD_ROLE.test(c.role) || c.rg || (!c.ls && !c.tw && (c.ol || c.probe === undefined || /^(button|menuitem|tab)$/.test(c.role)));
     const cuts = [
-      v => v.controls.forEach(c => { delete c.options; }),
+      // The header and navigation on every screen have one descriptor (but for the address, kept per view in dpath):
+      // it is stored once (st.hotD) and put back in the map by toMap. Only for copies the walk will not press.
+      v => v.controls.forEach(c => {
+        if (!c.hot || !c.d || (c.probe !== 'twin' && c.probe !== 'link')) return;
+        const k = sigOf(c);
+        st.hotD = st.hotD || {};
+        if (!st.hotD[k]) { const { path, ...d } = c.d; st.hotD[k] = d; return; }
+        c.dref = k; delete c.d;
+      }),
+      // Row repeats beyond two per twin key (the map lists a row control once anyway): the pressed one, else the one
+      // that leads somewhere, else the first, and one not yet pressed.
+      v => {
+        const by = new Map();
+        for (const c of v.controls) { const k = c.rk || c.tw; if (k) { if (!by.has(k)) by.set(k, []); by.get(k).push(c); } }
+        const drop = new Set();
+        for (const g of by.values()) {
+          if (g.length <= 2) continue;
+          const a = g.find(c => c.probe === 'pressed' || c.probe === 'mutating') || g.find(c => c.to) || g[0];
+          const b = g.find(c => c !== a && c.probe === undefined) || g.find(c => c !== a);
+          g.forEach(c => { if (c !== a && c !== b) drop.add(c); });
+        }
+        if (drop.size) v.controls = v.controls.filter(c => !drop.has(c));
+      },
+      v => v.controls.forEach(c => fpCut(c, fp => { if (fp.neighbors) fp.neighbors = fp.neighbors.slice(0, 4); if (fp.ancestry) fp.ancestry = fp.ancestry.slice(0, 3); })),
+      v => v.controls.forEach(c => { if (c.hot) { const k = `${c.role}|${c.name}`; if (firstHot.has(k)) fpCut(c, fp => { delete fp.neighbors; delete fp.ancestry; delete fp.classes; delete fp.container; }); else firstHot.add(k); } }),
+      v => v.controls.forEach(c => { if (c.options && c.options.length > 8) c.options = c.options.slice(0, 8); }),
       v => { if (v.facts) v.facts = v.facts.slice(0, 4); },
       v => { v.headings = (v.headings || []).slice(0, 2); },
       v => v.controls.forEach(c => { if (c.d && c.d.sel) c.d.sel = c.d.sel.slice(0, 1); }),
-      v => { if (v.controls.length > 60) { const keep = v.controls.filter(c => c.to || c.probe === undefined || c.probe === 'pressed'); v.controls = keep.concat(v.controls.filter(c => !keep.includes(c)).slice(0, Math.max(0, 60 - keep.length))); } },
+      v => v.controls.forEach(c => fpCut(c, fp => { delete fp.neighbors; delete fp.ancestry; })),
+      // Long lists: sort and filter headers, row repeats and plain text controls go first.
+      v => {
+        if (v.controls.length <= 60) return;
+        const keep = v.controls.filter(needed);
+        const more = v.controls.filter(c => !needed(c) && !c.ls && !c.tw).slice(0, Math.max(0, 60 - keep.length));
+        const left = new Set(keep.concat(more));
+        v.controls = v.controls.filter(c => left.has(c));
+      },
+      v => v.controls.forEach(c => { delete c.options; }),
     ];
     for (const cut of cuts) { views.forEach(cut); if (size() <= LIMITS.bytes) return; }
   }
@@ -1445,20 +1565,57 @@
     for (let i = 0; x && x.enter && i < 5; i++) x = st.views[x.enter.page];
     return x ? x.key : v.key;
   }
-  /** A tab panel: go to its page, then press its tab (only when it is not selected already). */
+  // The open dialog a dialog view was captured from (same title), or null.
+  const dialogOf = v => openDialogs().find(d => dialogTitle(d).slice(0, 80) === v.title) || null;
+  /**
+   * A view entered again by pressing what opened it on its parent view (v.enter = { page: parent key, ref }):
+   *  - a tab panel: press its tab, only when it is not selected already;
+   *  - a dialog with tabs (enter.dialog): press its opener again, unless that dialog is open already;
+   *  - a menu that makes something (enter.menu): open it, unless it is open already.
+   * The control found again goes through refind() and pressKind() like any press.
+   */
   async function enterPanel(v) {
     const parent = st.views[v.enter.page];
     if (!parent || parent === v) return 'skip';
+    if (v.enter.dialog && dialogOf(v)) return 'here';
+    // Another dialog left open would cover the opener.
+    for (const d of openDialogs()) if (!(await closeDialog(d))) return 'skip';
     const at = await goTo(parent);
     if (at !== 'here') return at;
     const c = (parent.controls || []).find(x => x.ref === v.enter.ref);
     const f = c ? refind(c) : null;
-    if (!f || f.kind !== 'tab') return 'skip';
+    if (!f) return 'skip';
+    if (v.enter.dialog) {
+      if (f.kind === 'tab' || !press(f.el)) return 'skip';
+      await settle();
+      return dialogOf(v) ? 'here' : 'skip';
+    }
+    if (v.enter.menu) {
+      if (f.el.getAttribute('aria-expanded') !== 'true') {
+        if (!press(f.el)) return 'skip';
+        await settle(150, 900);
+      }
+      return 'here';
+    }
+    if (f.kind !== 'tab') return 'skip';
     if (f.el.getAttribute('aria-selected') !== 'true') {
       if (!press(f.el)) return 'skip';
       await settle();
     }
     return 'here';
+  }
+  // Leaving an entered dialog or menu: put the screen back, so the next view starts clean.
+  async function leaveView(v) {
+    if (!v || !v.enter || !(v.enter.dialog || v.enter.menu)) return;
+    for (const d of openDialogs()) await closeDialog(d);
+    if (v.enter.menu) {
+      const parent = st.views[v.enter.page];
+      const c = parent && (parent.controls || []).find(x => x.ref === v.enter.ref);
+      const f = c ? refind(c) : null;
+      if (f && f.el.getAttribute('aria-expanded') === 'true') press(f.el);
+      else escape();
+      await settle(150, 600);
+    }
   }
 
   async function goTo(v) {
@@ -1514,6 +1671,7 @@
   function nextProbe(v) {
     if ((v.pressed || 0) >= LIMITS.perView || v.blocked) return null;
     v.done = v.done || {};
+    let best = null, bestRank = 9;
     for (const c of v.controls) {
       if (c.probe !== undefined) continue;
       const sig = sigOf(c), twin = c.tw || `${c.role}|${c.name}`;
@@ -1525,9 +1683,49 @@
         continue;
       }
       if (c.hot && Object.prototype.hasOwnProperty.call(st.seen, sig)) { c.probe = 'twin'; if (st.seen[sig]) c.to = st.seen[sig]; continue; }
+      // A record page of another status (a booked and a dispatched load) or another tab of the same record shows the
+      // same «Add tag», «Share load», «More actions»: what one of them opened is shared, not pressed again.
+      if (recordLike(v) && st.recSeen[sig]) { c.probe = 'twin'; c.to = st.recSeen[sig]; continue; }
       if (c.ls && (v.lists || 0) >= 1) { c.probe = 'skip'; continue; }
-      return c;
+      const rank = probeRank(c);
+      if (rank < bestRank) { best = c; bestRank = rank; }
     }
+    // Only sort, filter and table settings are left: they wait for the end of the walk (phase 2).
+    if (best && bestRank === LOW && st.phase !== 2) {
+      if (!v.deferred) { v.deferred = true; st.later.push(v.key); }
+      return null;
+    }
+    return best;
+  }
+  // A record page (a sample of a record template, or one of its tabs), or a panel on one.
+  const recordLike = v => { const h = st.views[homeKey(v)]; return !!h && !!(h.rec || h.rtab); };
+  // What a probe is worth to a guide: openers of forms, dialogs and records first, then tabs, then menus and the
+  // rest, then the header (once per walk). Sort and filter controls and table settings (Columns, Density) are LOW:
+  // put off until the queue is empty, they rarely lead to a task.
+  const LOW = 5;
+  const TABLE_TOOL = /^(?:columns?|колонки|столбцы|density|плотность|customi[sz]e columns|show columns|view options)(?: |$)/;
+  function probeRank(c) {
+    if (c.ls || TABLE_TOOL.test(dnorm(c.name))) return LOW;
+    if (c.hot) return 3;
+    if (c.ol) return 0;
+    if (c.role === 'tab') return 1;
+    return 2;
+  }
+
+  // The next view to open. Forms are what guides need, so the urgent ones come first: tab panels, dialogs and menus
+  // entered again, the first sample of each record page and that record's tabs. Navigation pages at least every
+  // fourth pick, so a stream of record links never starves the menu (nor the menu the records). Then the rest of the
+  // content queue; then st.later (second record samples, views whose low-value probes were put off) in phase 2.
+  function nextKey() {
+    const urgent = k => { const v = st.views[k]; return !!v && (!!v.enter || v.rec === 1 || !!v.rtab); };
+    if (!((st.streak || 0) >= 3 && st.hot.length)) {
+      const i = st.queue.findIndex(urgent);
+      if (i >= 0) { st.streak = (st.streak || 0) + 1; return st.queue.splice(i, 1)[0]; }
+    }
+    st.streak = 0;
+    if (st.hot.length) return st.hot.shift();
+    if (st.queue.length) return st.queue.shift();
+    if (st.later.length) { st.phase = 2; return st.later.shift(); }
     return null;
   }
 
@@ -1540,7 +1738,7 @@
         if (!live(g)) { status = 'stopped'; break; }
         if (st.probes >= LIMITS.probes || Date.now() - st.startedAt > LIMITS.ms) break;
         if (!st.cur) {
-          const key = st.hot.shift() || st.queue.shift();
+          const key = nextKey();
           if (!key) break;
           st.cur = { key };
         }
@@ -1564,7 +1762,7 @@
           progress(`Экран «${v.title}»`);
         }
         const c = nextProbe(v);
-        if (!c) { st.cur = null; continue; }
+        if (!c) { await leaveView(v); st.cur = null; continue; }
         // Watchdog: one press may take 8 s at most, whatever the page does.
         const ctx = { ok: true };
         let timer = 0;
@@ -1583,6 +1781,7 @@
       }
     } catch (e) {
       if (st) st.error = String((e && e.message) || e).slice(0, 200);
+      try { console.warn('[Scopos] the walk stopped on an error:', (e && e.stack) || e); } catch (x) { /* no console */ }
       status = 'stopped';
     } finally {
       if (looping === g) looping = 0;
@@ -1596,7 +1795,7 @@
     if (!found) { c.probe = 'missing'; return; }
     const { el, kind } = found;
     flash(el, `Изучаю: «${c.name}»`);
-    await wait(lite ? 200 : 520); // let the ring land so the walk is watchable
+    await wait(lite ? 200 : 360); // let the ring land so the walk is watchable
     if (!ok()) return;
     // Asked once more on purpose: the page had half a second to change the control (disable it, relabel it).
     if (!el.isConnected || !pressKind(el)) { c.probe = 'missing'; return; }
@@ -1605,6 +1804,7 @@
     const tablist = kind === 'tab' ? el.closest('[role=tablist]') : null;
     const tabBefore = tablist ? [...tablist.querySelectorAll('[role=tab]')].find(t => t.getAttribute('aria-selected') === 'true') : null;
     const before = new Set(inventory().map(x => x.el));
+    const rect0 = el.getBoundingClientRect();
     const blocked0 = blockedCount(), fenced0 = fenced;
     const net0 = kind === 'form' ? await netCount() : 0;
     if (!ok()) return;
@@ -1632,15 +1832,48 @@
     const wrote = blockedCount() > blocked0 || (kind === 'form' && (await netCount()) > net0);
     if (wrote) { c.probe = 'mutating'; c.state = c.state ? `${c.state}, changes data` : 'changes data'; }
     if (!live(g)) return;
-    const r = await outcome(v, c, el, kind, ctx, { beforeKey, beforeDialogs, expandedBefore, tabBefore, before, nodes });
+    const r = await outcome(v, c, el, kind, ctx, { beforeKey, beforeDialogs, expandedBefore, tabBefore, before, nodes, rect0 });
     if (c.hot) st.seen[sigOf(c)] = c.to || null;
+    if (recordLike(v) && c.to && st.views[c.to] && st.views[c.to].kind !== 'page') st.recSeen[sigOf(c)] = c.to;
     if (r) return r;
     if (!c.to && c.kind !== 'page' && fenced > fenced0) { c.probe = 'external'; return; } // tried to leave: cancelled
     if (!c.to && c.probe === 'mutating') { c.commit = true; st.commits[sigOf(c)] = 1; }
   }
 
+  /**
+   * The press re-rendered its own control: put the screen back without reloading the page. The re-rendered copy of
+   * the control (self, or the same control found again by its descriptor) is pressed again: an in-place toggle
+   * folds back. Else (a record's «Edit load» became «Cancel» and «Save load») an exact «Cancel» / «Close» / × that
+   * appeared, checked like a dialog's closer against the text of its own box.
+   */
+  function restoreInPlace(c, appeared, self) {
+    if (self && self.isConnected && pressKind(self)) return press(self);
+    const f = refind(c);
+    if (f) return press(f.el);
+    for (const x of appeared) {
+      if (x.role !== 'button' || !x.el.isConnected || !isCloser(x.name)) continue;
+      const box = x.el.parentElement;
+      if (box && !box.matches('main,[role=main],body') && closerIn(box) === x.el) return press(x.el);
+    }
+    return false;
+  }
+
+  // An inline form a press showed (a record's «Edit load» turns its details into fields, «Save load» above them):
+  // the commit is not next to the fields, so a button that saves is marked as the panel's commit (never pressed).
+  const SAVE_LIKE = /^(?:save|update|apply|submit|done|confirm|сохранить|применить|готово|подтвердить|обновить)(?: |$)/;
+  function inlineCommits(v) {
+    const cs = v.controls || [];
+    if (!cs.some(c => FIELD_ROLE.test(c.role))) return;
+    for (const c of cs) {
+      if (c.role !== 'button' || c.commit || !SAVE_LIKE.test(dnorm(c.name))) continue;
+      c.commit = true;
+      delete c.ol;
+      if (c.probe === undefined) c.probe = 'commit';
+    }
+  }
+
   /** What a press did: a new page, a dialog, a panel or nothing. Returns 'leaving' when the document goes away. */
-  async function outcome(v, c, el, kind, ctx, { beforeKey, beforeDialogs, expandedBefore, tabBefore, before, nodes }) {
+  async function outcome(v, c, el, kind, ctx, { beforeKey, beforeDialogs, expandedBefore, tabBefore, before, nodes, rect0 }) {
     const afterKey = pageKey();
     if (afterKey !== beforeKey) {
       const t = location.origin === st.origin ? addView(afterKey, cleanUrl(location.href), 'page', undefined, false, location.href) : null;
@@ -1651,9 +1884,18 @@
 
     const dlg = openDialogs().find(d => !beforeDialogs.includes(d));
     if (dlg) {
-      const key = `${homeKey(v)} › ${dialogTitle(dlg)}`; // one per page, whichever of its panels opened it
+      let key = `${homeKey(v)} › ${dialogTitle(dlg)}`; // one per page, whichever of its panels opened it
+      if (st.views[key] && st.views[key].kind !== 'dialog') key += ' ‹dialog›'; // a menu «Create Truck» and its dialog «Create Truck»
       const dv = addView(key, v.url, 'dialog', v.key);
-      if (dv && !dv.captured) { dv.opener = c.ref; await captureView(dv, dlg); }
+      if (dv && !dv.captured) {
+        dv.opener = c.ref;
+        await captureView(dv, dlg);
+        // Tabs inside the dialog («Manual entry» in «Create New Load»): the dialog is entered again for them.
+        // The same dialog on another page («Create New Load» from the header, the board and the trips list): its tabs
+        // once per walk.
+        const sig = `${dv.title}¦${dv.controls.map(x => `${x.role}:${x.name}`).join('|')}`;
+        if (dv.controls.some(x => x.probe === undefined) && !st.dlgSeen[sig]) { st.dlgSeen[sig] = 1; dv.enter = { page: v.key, ref: c.ref, dialog: true }; st.queue.push(key); }
+      }
       if (dv) c.to = key;
       c.kind = 'dialog';
       if (!(await closeDialog(dlg))) return ctx.ok ? stuck(c) : undefined;
@@ -1668,6 +1910,18 @@
     for (let x = v, i = 0; x && i < 5; x = st.views[x.parent], i++) (x.controls || []).forEach(k => known.add(`${k.role}|${k.name}`));
     const tablist = el.closest('[role=tablist]');
     const appeared = appearedAfter(el, nodes, before).filter(x => !known.has(`${x.role}|${x.name}`) && !(tablist && tablist.contains(x.el)));
+    // The press re-rendered its own control (an in-place toggle: same place, same role, its label may change): that
+    // copy is the control itself, not something the press showed. Never a control that saves or acts.
+    let self = null;
+    if (!el.isConnected && rect0) {
+      const cx = rect0.left + rect0.width / 2, cy = rect0.top + rect0.height / 2;
+      const i = appeared.findIndex(x => {
+        if (x.role !== c.role || !x.el.isConnected || isDangerText(textOf(x.el)) || commitOf(x.el, x.name)) return false;
+        const r = x.el.getBoundingClientRect();
+        return Math.abs(r.left + r.width / 2 - cx) < 12 && Math.abs(r.top + r.height / 2 - cy) < 12;
+      });
+      if (i >= 0) { self = appeared[i].el; appeared.splice(i, 1); }
+    }
     // A tab that switched (re-rendered or not) shows a panel even with no new controls: its facts and tables count.
     const tabSwitched = kind === 'tab' && tabBefore !== el && !(el.isConnected && el.getAttribute('aria-selected') === 'false');
     if (appeared.length || tabSwitched || (expandedBefore !== 'true' && el.getAttribute('aria-expanded') === 'true')) {
@@ -1675,16 +1929,32 @@
       // after pressing the tab again (mv.enter). Menus, popovers and disclosures stay look-only.
       // Tab panels are keyed by their page, so the same tab reached from another panel is the same view.
       const isTab = kind === 'tab' && !(el.tagName === 'A' && safeHref(el));
-      const key = `${isTab ? homeKey(v) : v.key} › ${mask(c.name)}`;
+      const inDialog = v.kind === 'dialog';
+      const key = `${isTab && !inDialog ? homeKey(v) : v.key} › ${mask(c.name)}`;
+      // A menu that makes something ("Create Truck ▾"): its items are pressed like form openers, one per visit
+      // (the menu is opened again for each, enterPanel). Only with writes blocked below the page.
+      const makeMenu = !isTab && !inDialog && formsOn && (kind === 'menu' || kind === 'disclosure') && makeLabel(c.name);
       const mv = addView(key, v.url, 'panel', v.key);
       if (mv && !mv.captured) {
         mv.title = mask(c.name).slice(0, 80); mv.headings = []; mv.opener = c.ref;
         mv.facts = factsOf(panelRoot(el, nodes), [mv.title, v.title, ...(v.headings || []), ...(v.facts || [])]);
-        mv.controls = await controlsOf(mv, appeared.slice(0, LIMITS.controls), !isTab, new Map());
+        mv.controls = await controlsOf(mv, appeared.slice(0, LIMITS.controls), inDialog || !(isTab || makeMenu), new Map());
+        if (makeMenu) mv.controls.forEach(x => { if (x.probe === undefined && x.role !== 'menuitem') x.probe = 'skip'; });
+        // A tab of a dialog shares the dialog's footer: its commit («Done», enabled only on this tab) belongs to it.
+        const box = inDialog ? dialogOf(v) : null;
+        if (box) {
+          const have = new Set(mv.controls.concat(v.controls || []).map(x => `${x.role}|${x.name}`));
+          for (const x of inventory(box)) {
+            if (have.has(`${x.role}|${x.name}`) || !commitOf(x.el, x.name)) continue;
+            have.add(`${x.role}|${x.name}`);
+            mv.controls.push(control(mv, x, mv.controls.length, true, undefined, new Map()));
+          }
+        }
         const root = isTab ? panelRoot(el, nodes) : null;
         if (root) mv.controls.push(...regionControls(mv, root, mv.controls.length, true));
+        inlineCommits(mv);
         mv.captured = true;
-        if (isTab && mv.controls.some(x => x.probe === undefined)) { mv.enter = { page: v.key, ref: c.ref }; st.queue.push(key); }
+        if ((isTab || makeMenu) && !inDialog && mv.controls.some(x => x.probe === undefined)) { mv.enter = { page: v.key, ref: c.ref, menu: makeMenu || undefined }; st.queue.push(key); }
       }
       if (mv) c.to = key;
       c.kind = 'panel';
@@ -1698,7 +1968,7 @@
       if (back && pressKind(back) === 'tab') press(back);
       else if (el.isConnected && el.getAttribute('aria-expanded') === 'true') press(el);
       else if (el.tagName === 'SUMMARY' && el.parentElement && el.parentElement.open) press(el);
-      else escape();
+      else if (el.isConnected || !restoreInPlace(c, appeared, self)) escape();
       await settle(150, 900);
       if (!ctx.ok) return;
       // A dialog that the press opened late, or a panel that would not fold: start this screen clean.
@@ -1707,6 +1977,8 @@
       if (ctx.ok && appeared.some(x => x.el.isConnected && shown(x.el))) return reload();
       return;
     }
+    // An in-place toggle re-rendered itself and showed nothing we read as controls: toggle it back.
+    if (self && self.isConnected && pressKind(self)) { press(self); await settle(150, 900); }
     c.probe = c.probe === 'mutating' ? 'mutating' : 'nothing';
   }
 
@@ -1750,14 +2022,14 @@
   const EXPLORED = new Set(['nothing', 'mutating', 'twin', 'commit']);
 
   /** One control in the map format. */
-  function controlOut(c, page, idOf, twin) {
+  function controlOut(c, page, idOf, twin, dpath) {
     // A twin that was never reached (the view's press limit) shares what its pressed twin found.
     if (twin && twin !== c && c.probe === undefined) c = { ...c, to: c.to || twin.to, probe: 'twin' };
     const to = idOf(c.to);
     return {
       ref: c.ref, role: c.role, name: c.name, section: c.section, state: c.state, options: c.options,
       // Which screen the control lives on, so a guide can say «Перейдите на страницу …».
-      d: c.d ? { ...c.d, view: page.title } : c.d,
+      d: c.d ? { ...c.d, ...(c.d.path === undefined && dpath ? { path: dpath } : {}), view: page.title } : c.d,
       to,
       commit: c.commit ? true : undefined,
       unexplored: c.ol && !c.commit && !to && !EXPLORED.has(c.probe) ? true : undefined,
@@ -1767,13 +2039,13 @@
     };
   }
   /** One view in the map format (toMap and snapshot share it). */
-  function viewOut(v, page, idOf, parentId) {
+  function viewOut(v, page, idOf, parentId, hotD) {
     const pressed = {};
     for (const c of v.controls || []) if (c.tw && !pressed[c.tw] && (c.to || EXPLORED.has(c.probe) || c.probe === 'pressed')) pressed[c.tw] = c;
     // A row control is listed once per view (the one that led somewhere, else the pressed one), not once per row.
     const rep = {}, worth = c => (c.to ? 2 : 0) + (c.probe === 'pressed' || c.probe === 'mutating' ? 1 : 0);
     for (const c of v.controls || []) if (c.rk && (!rep[c.rk] || worth(c) > worth(rep[c.rk]))) rep[c.rk] = c;
-    const controls = (v.controls || []).filter(c => !c.rk || rep[c.rk] === c).map(c => controlOut(c, page, idOf, c.tw && pressed[c.tw]));
+    const controls = (v.controls || []).filter(c => !c.rk || rep[c.rk] === c).map(c => controlOut(!c.d && c.dref && hotD && hotD[c.dref] ? { ...c, d: hotD[c.dref] } : c, page, idOf, c.tw && pressed[c.tw], v.dpath));
     const form = controls.some(c => FIELD_ROLE.test(c.role)) && controls.some(c => c.commit);
     return {
       id: v.id, key: v.key, url: v.url, kind: v.kind, parent: parentId, opener: v.opener,
@@ -1790,7 +2062,7 @@
     const idOf = k => (k && all[k] && all[k].captured ? all[k].id : undefined);
     return {
       origin: s.origin, learnedAt: new Date().toISOString(), status: s.status, probes: s.probes,
-      views: views.map(v => viewOut(v, v.kind === 'page' ? v : all[v.parent] || v, idOf, v.parent && all[v.parent] ? all[v.parent].id : undefined)),
+      views: views.map(v => viewOut(v, v.kind === 'page' ? v : all[v.parent] || v, idOf, v.parent && all[v.parent] ? all[v.parent].id : undefined, s.hotD)),
     };
   }
 
@@ -1806,11 +2078,11 @@
     opts = o; stopping = false;
     st = {
       v: 2, status: 'running', stopping: false, origin: location.origin, startedAt: Date.now(),
-      views: {}, hot: [], queue: [], cur: null, probes: 0, pending: null, nav: null,
+      views: {}, hot: [], queue: [], later: [], phase: 1, streak: 0, cur: null, probes: 0, pending: null, nav: null,
       n: { ids: 0, pages: 0, extra: 0 }, shapes: {}, redirects: {},
       // netBlocked: what the host said at start (kept for resumes); commits: role|name|section of controls seen
       // writing; seen: global header controls already pressed (→ the view key they opened, or null).
-      netBlocked: o.netBlocked === true, forms: false, commits: {}, seen: {},
+      netBlocked: o.netBlocked === true, forms: false, commits: {}, seen: {}, recSeen: {}, dlgSeen: {},
     };
     const first = addView(pageKey(), cleanUrl(location.href), 'page', undefined, true, false);
     if (first) first.start = true;
@@ -1843,8 +2115,8 @@
     if (!s || s.status !== 'running' || !s.views) return quit(false);
     opts = o; st = s;
     st.n = st.n || { ids: Object.keys(st.views).length, pages: 0, extra: 0 };
-    st.hot = st.hot || []; st.queue = st.queue || []; st.shapes = st.shapes || {}; st.redirects = st.redirects || {};
-    st.commits = st.commits || {}; st.seen = st.seen || {};
+    st.hot = st.hot || []; st.queue = st.queue || []; st.later = st.later || []; st.shapes = st.shapes || {}; st.redirects = st.redirects || {};
+    st.commits = st.commits || {}; st.seen = st.seen || {}; st.recSeen = st.recSeen || {}; st.dlgSeen = st.dlgSeen || {};
     // Origin lock: the press led off-site (OAuth, checkout) or the user went elsewhere. Leave the tab alone:
     // no navigating back, and no onDone (the map belongs to the other origin); onAbort tells the app.
     if (location.origin !== st.origin) {

@@ -8,13 +8,15 @@
 //   --holdout    also tasks-<product>-holdout.json (written after tuning, run once: the honest number)
 // Per task: guide (ran a guide: graded), fact (answered from the FAQ: graded like a fact answer), suggest (offered
 // chips: does one of them grade?), none (goes to Claude). Wrong = answered locally but the grader says no (an
-// impossible task answered locally is always wrong). Also a speed test on a synthetic 300 guides × 6 phrasings.
+// impossible task answered locally is always wrong). Live = a live guide (it ends at a control the explorer did not
+// open and continues on the page) whose steps are the start of an expected path: not right yet, not wrong; counted
+// on its own. A live guide that went the wrong way is wrong. Also a speed test on a synthetic 300 guides × 6 phrasings.
 // Results: $EVAL_OUT/local-<product>.json. No Claude call, no spend.
 import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Brain, save, pct, loadJSON } from './lib.mjs';
-import { grade } from './grade.mjs';
+import { grade, gradeLive } from './grade.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const arg = (k, d) => { const i = process.argv.indexOf('--' + k); return i > 0 ? process.argv[i + 1] : d; };
@@ -48,16 +50,17 @@ for (const [set, file] of sets) {
     const g = local ? grade(task, asOut(m), map) : null;
     const impossible = task.kind === 'impossible';
     const right = local && !impossible && g.usable;
+    const live = local && !right && !impossible && m.kind === 'guide' && !!m.guide.live && gradeLive(task, asOut(m), map);
     const sugHit = m.kind === 'suggest' && !impossible && m.suggest.some(pb => grade(task, asOut({ kind: 'guide', steps: pb.steps }), map).usable);
     const r = {
       set, id: task.id, kind: task.kind, q: task.q, outcome: m.kind, ms: +ms.toFixed(3), score: +(m.score || 0).toFixed(3),
       guide: m.guide ? m.guide.name : null, answer: m.kind === 'fact' ? m.answer : null,
-      exact: !!(local && !impossible && g.exact), usable: !!right, wrong: local && !right, langOk: g ? g.langOk : null, why: g && !g.usable ? g.why : '',
+      exact: !!(local && !impossible && g.exact), usable: !!right, live, wrong: local && !right && !live, langOk: g ? g.langOk : null, why: g && !g.usable ? g.why : '',
       suggest: (m.suggest || []).map(pb => pb.name), sugHit, top: m.top,
       values: m.kind === 'guide' ? m.steps.filter(s => s.value).map(s => `${(s.target && s.target.text) || '?'}=${s.value}`) : [],
     };
     rows.push(r);
-    const tag = r.wrong ? 'WRONG ' : r.exact ? 'EXACT ' : r.usable ? 'usable' : m.kind === 'suggest' ? (sugHit ? 'sug+  ' : 'sug-  ') : '-     ';
+    const tag = r.wrong ? 'WRONG ' : r.live ? 'LIVE  ' : r.exact ? 'EXACT ' : r.usable ? 'usable' : m.kind === 'suggest' ? (sugHit ? 'sug+  ' : 'sug-  ') : '-     ';
     console.log(`${tag} ${set.padEnd(5)} ${task.id.padEnd(12)} ${m.kind.padEnd(7)} ${r.score.toFixed(2)} ${r.guide ? '«' + r.guide + '»' : r.answer ? '“' + r.answer.slice(0, 70) + '”' : ''}${r.values.length ? ' {' + r.values.join(', ') + '}' : ''}${r.why ? ' — ' + r.why : ''}${verbose || (m.kind !== 'guide' && m.kind !== 'fact') ? '  top: ' + JSON.stringify(r.top) : ''}`);
   }
 }
@@ -67,11 +70,11 @@ function summary(list) {
   const c = f => list.filter(f).length;
   return {
     n, local: c(r => r.outcome === 'guide' || r.outcome === 'fact'), guide: c(r => r.outcome === 'guide'), fact: c(r => r.outcome === 'fact'),
-    exact: c(r => r.exact), usable: c(r => r.usable), wrong: c(r => r.wrong), suggest: c(r => r.outcome === 'suggest'), suggestHit: c(r => r.sugHit), none: c(r => r.outcome === 'none'),
-    instantRight: `${(100 * c(r => r.usable) / n).toFixed(0)}%`, wrongShare: `${(100 * c(r => r.wrong) / n).toFixed(1)}%`, toClaude: `${(100 * c(r => !(r.outcome === 'guide' || r.outcome === 'fact')) / n).toFixed(0)}%`,
+    exact: c(r => r.exact), usable: c(r => r.usable), live: c(r => r.live), wrong: c(r => r.wrong), suggest: c(r => r.outcome === 'suggest'), suggestHit: c(r => r.sugHit), none: c(r => r.outcome === 'none'),
+    instantRight: `${(100 * c(r => r.usable) / n).toFixed(0)}%`, liveShare: `${(100 * c(r => r.live) / n).toFixed(0)}%`, wrongShare: `${(100 * c(r => r.wrong) / n).toFixed(1)}%`, toClaude: `${(100 * c(r => !(r.outcome === 'guide' || r.outcome === 'fact')) / n).toFixed(0)}%`,
     answerable: answerable.length, impossibleLocal: c(r => r.kind === 'impossible' && (r.outcome === 'guide' || r.outcome === 'fact')),
     langMismatch: c(r => r.usable && r.langOk === false),
-    byKind: Object.fromEntries([...new Set(list.map(r => r.kind))].map(k => { const x = list.filter(r => r.kind === k); return [k, `${x.filter(r => r.usable).length} right / ${x.filter(r => r.wrong).length} wrong / ${x.length}`]; })),
+    byKind: Object.fromEntries([...new Set(list.map(r => r.kind))].map(k => { const x = list.filter(r => r.kind === k); return [k, `${x.filter(r => r.usable).length} right / ${x.filter(r => r.live).length} live / ${x.filter(r => r.wrong).length} wrong / ${x.length}`]; })),
   };
 }
 const out = { product, guides: K.guides.length, faq: (K.faq || []).length, facts: ix.facts, indexMs: +indexMs.toFixed(2), sets: {} };

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoadLedger TMS</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%236c4be6%22/%3E%3Cg fill=%22white%22%3E%3Ccircle cx=%229%22 cy=%229%22 r=%222.6%22/%3E%3Ccircle cx=%2216%22 cy=%229%22 r=%222%22/%3E%3Ccircle cx=%2223%22 cy=%229%22 r=%222.6%22/%3E%3Ccircle cx=%229%22 cy=%2216%22 r=%222%22/%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%222.6%22/%3E%3Ccircle cx=%2223%22 cy=%2216%22 r=%222%22/%3E%3Ccircle cx=%229%22 cy=%2223%22 r=%222.6%22/%3E%3Ccircle cx=%2216%22 cy=%2223%22 r=%222%22/%3E%3Ccircle cx=%2223%22 cy=%2223%22 r=%222.6%22/%3E%3C/g%3E%3C/svg%3E">
+<link rel="stylesheet" href="app.css">
+<!--
+  RoadLedger TMS: a fictional trucking TMS. A workflow-level replica (information architecture, screen layout, control and column
+  labels, statuses and flows) rebuilt from frames and notes of a real product's public tutorial videos, used as the test bed for
+  Scopos. Neutral name and logo; no external resources. Screens marked "inferred from tutorial title" in the code were not captured
+  in frames and were designed from the tutorial titles only.
+  Files: data.js (deterministic seed), app.js (core), views-loads.js, views-fleet.js, views-accounting.js, views-misc.js.
+-->
+</head>
+<body>
+<div id="root"><noscript>RoadLedger TMS needs JavaScript.</noscript></div>
+<script src="data.js"></script>
+<script src="app.js"></script>
+<script src="views-loads.js"></script>
+<script src="views-fleet.js"></script>
+<script src="views-accounting.js"></script>
+<script src="views-misc.js"></script>
+<script>RL.boot();</script>
+<script src="/scopos.js" data-endpoint="/api/scopos" data-product="RoadLedger TMS, trucking transportation management" data-learn></script>
+</body>
+</html>
