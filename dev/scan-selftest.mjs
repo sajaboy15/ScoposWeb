@@ -10,7 +10,7 @@ const file = join(dirname(fileURLToPath(import.meta.url)), '..', 'extension', 'c
 const sandbox = {};
 vm.runInNewContext(readFileSync(file, 'utf8'), sandbox, { filename: file });
 const S = sandbox.Scopos;
-const { normText, textSim, scoreFeatures, lev, redact, stableId, stableClass, fpOf, rowSim, identityOK, accepts, pathKey } = S._test;
+const { normText, textSim, scoreFeatures, lev, redact, stableId, stableClass, fpOf, rowSim, identityOK, accepts, pathKey, samePlace, labelFits } = S._test;
 
 let failed = 0, passed = 0;
 function check(name, cond, extra) {
@@ -158,6 +158,13 @@ check('non-route hash ignored', pathKey('/a#section') === pathKey('/a'));
 check('hash route kept', pathKey('/#/deals/5?x=1') === '/#/deals/:id');
 check('record detail after a row step: any load is the same screen', pathKey('/demo/tms/index.html#/loads/1066') === pathKey('http://localhost:4173/demo/tms/index.html#/loads/2207')
   && pathKey('/demo/tms/index.html#/loads/1066') === '/demo/tms/index.html#/loads/:id' && pathKey('/x#/billing/invoices/5020') === '/x#/billing/invoices/:id');
+
+check('record numbers are ids: DT-000004 and DT-000148 are one screen', pathKey('/r#/load-management/create-load/assigned/4/DT-000004') === pathKey('/r#/load-management/create-load/assigned/148/DT-000148')
+  && pathKey('/x/orders/INV-2024-001') === '/x/orders/:id' && pathKey('/x/create-load') === '/x/create-load' && pathKey('/x/v2/html5') === '/x/v2/html5');
+check('a record screen in another state is the same place', samePlace('/r#/loads/booked/172/DT-000172', '/r#/loads/assigned/4/DT-000004')
+  && !samePlace('/r#/loads/booked', '/r#/loads/assigned') && !samePlace('/r#/loads/booked/1/x', '/r#/trips/assigned/1/y') && !samePlace('/a/:id', '/b/c/:id'));
+
+check('a record link learned redacted ("DT-…") fits every record', labelFits({ pre: 'dt', suf: '', same: true }, 'DT-000171') && labelFits({ pre: 'dt', suf: '', same: true }, 'DT-000004') && !labelFits({ pre: 'dt', suf: '', same: true }, 'Edit'));
 
 console.log(`${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

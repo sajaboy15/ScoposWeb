@@ -191,7 +191,8 @@
   /** Does a label fit a row pattern (rowPattern's pre / suf, or a data column: any label)? Pure. */
   function labelFits(ro, name) {
     if (!ro || ro.data) return true;
-    const n = normText(name);
+    // The pattern was made from redacted labels (rowInfo: "DT-000172" → "DT-…"): compare like with like.
+    const n = normText(redact(name));
     if (ro.same) return n === ro.pre;
     return (!ro.pre || n === ro.pre || n.startsWith(ro.pre + ' ')) && (!ro.suf || n === ro.suf || n.endsWith(' ' + ro.suf));
   }
@@ -321,7 +322,7 @@
   // ids become :id ("/invoices/12" = "/invoices/7"), trailing slashes go, route-like query params stay
   // (?page=list), and only "#/" or "#!" hashes are routes ("#top" is not).
   const ROUTE_Q = /^(page|view|tab|section|module|route|p|screen)$/i;
-  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,})(?=\/|$)/gi;
+  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,}|[A-Za-z]{1,8}[-_]?\d{3,}(?:[-_][A-Za-z0-9]+)*)(?=\/|$)/gi;
   // Parsed by hand (no URL object) so it behaves the same in pages, workers and tests.
   const pathKey = p => {
     let s = String(p || '/').replace(/^[a-z][a-z0-9+.-]*:\/\/[^/?#]*/i, '');
@@ -337,8 +338,21 @@
     return path + (q ? '?' + q : '') + (h.length > 2 ? h : '');
   };
 
+  // The same record screen in another state counts as the same place: a guide recorded on a booked load
+  // ("/loads/booked/:id") still runs on an assigned one ("/loads/assigned/:id"). One plain segment may differ.
+  const sibling = (a, b) => {
+    if (!a.includes(':id') || !b.includes(':id')) return false;
+    const x = a.split('/'), y = b.split('/');
+    if (x.length !== y.length) return false;
+    let diff = 0;
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i] && (x[i] === ':id' || y[i] === ':id' || ++diff > 1)) return false;
+    return diff === 1;
+  };
+  const samePlace = (a, b) => { const x = pathKey(a), y = pathKey(b); return x === y || sibling(x, y); };
+
   S.pathKey = pathKey;
-  S._test = { normText, textSim, simN, scoreFeatures, lev, levRatio, redact, stableId, stableClass, fpOf, rowSim, identityOK, accepts, pathKey, rowPattern, labelFits };
+  S.samePlace = samePlace;
+  S._test = { normText, textSim, simN, scoreFeatures, lev, levRatio, redact, stableId, stableClass, fpOf, rowSim, identityOK, accepts, pathKey, samePlace, rowPattern, labelFits };
   S.normText = normText;
 
   if (!hasDOM) return;
@@ -1637,7 +1651,7 @@
       const r = resolveRow(d, opts);
       return { el: r.el, score: r.el ? 1 : 0, margin: 1, ambiguous: false, candidates: r.els.slice(0, 8).map(el => ({ el, score: 1 })), via: r.el ? 'row' : 'none' };
     }
-    const need = d.path && pathKey(d.path) !== pathKey(pathNow()) ? T_OTHER_PAGE : T_ACCEPT;
+    const need = d.path && !samePlace(d.path, pathNow()) ? T_OTHER_PAGE : T_ACCEPT;
 
     // Re-render fast path: the element found last time is still here and still matches.
     const prevRef = lastFound.get(d), prev = prevRef && prevRef.deref();

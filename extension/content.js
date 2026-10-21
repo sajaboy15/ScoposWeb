@@ -56,7 +56,7 @@
   // "/a#" and "/a#/" are the same screen as "/a" in hash-routed apps.
   const here = () => location.pathname + (location.hash && location.hash !== '#' && location.hash !== '#/' ? location.hash : '');
   // The shared "same screen" rule from scan.js (record ids, route params and hash routes handled the same everywhere).
-  const samePage = path => !path || (S.pathKey ? S.pathKey(path) === S.pathKey(location.pathname + location.search + location.hash) : String(path).replace(/#\/?$/, '') === here());
+  const samePage = path => !path || (S.samePlace ? S.samePlace(path, location.pathname + location.search + location.hash) : S.pathKey ? S.pathKey(path) === S.pathKey(location.pathname + location.search + location.hash) : String(path).replace(/#\/?$/, '') === here());
   const scan = query => {
     try { return S.scan({ query }); } catch (e) { return S.scan(); }
   };

@@ -666,7 +666,7 @@
   const inventory = container => { try { return S.inventory(container) || []; } catch (e) { return []; } };
 
   // Screens by address: record ids become ":id", query routes (?page=x) count, "#top" does not.
-  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,})(?=\/|$)/gi;
+  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,}|[A-Za-z]{1,8}[-_]?\d{3,}(?:[-_][A-Za-z0-9]+)*)(?=\/|$)/gi;
   function pageKey(u = location.href) {
     const x = new URL(u, location.href);
     const path = x.pathname.replace(ID_SEG, '/:id').replace(/\/+$/, '') || '/';

@@ -64,6 +64,7 @@
   const DIALOG_MISSING = 1200; // a dialog just opened: its controls are there at once, so "missing" is decided sooner
   const MORE_AFTER = 6000, MORE_DIALOG = 2500; // visible ms on the right page before asking opts.more for a missing step
   const MAX_MORE = 3;   // opts.more calls per run
+  const RESYNC_AFTER = 1200, RESYNC_TRIES = 3; // off the guide's page this long: look for the step that fits here
   const MAX_ADDED = 25; // steps taken from one opts.more answer
   let cost = 0;         // last measured S.resolve cost on this page, ms
 
@@ -257,7 +258,7 @@
   }
 
   // "/invoices/12" and "/invoices/7" are the same screen; "#/x" is a route, "#top" is not.
-  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,})(?=\/|$)/gi;
+  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,}|[A-Za-z]{1,8}[-_]?\d{3,}(?:[-_][A-Za-z0-9]+)*)(?=\/|$)/gi;
   // scan.js defines the shared rule (S.pathKey); this fallback only keeps guide.js usable on its own.
   function ownPathKey(p) {
     const s = String(p || '/');
@@ -269,8 +270,16 @@
   }
   if (!S.pathKey) S.pathKey = ownPathKey;
   const pathKey = p => S.pathKey(p);
-  const samePage = path => !path || pathKey(path) === pathKey(location.pathname + location.search + location.hash);
-  const pagePlace = d => (d.view ? `«${String(d.view).slice(0, 60)}»` : `«${String(d.path || '/').split('?')[0].replace(/#(?![!/]).*$/, '').slice(0, 60)}»`);
+  const hereNow = () => location.pathname + location.search + location.hash;
+  // The same screen, or the same record screen in another state (S.samePlace: a booked load's page and an assigned one's).
+  const samePage = path => !path || (S.samePlace ? S.samePlace(path, hereNow()) : pathKey(path) === pathKey(hereNow()));
+  // A record screen's title names the sample record the study saw ("Load / 15128819"): drop the words with digits.
+  const pagePlace = d => {
+    const rec = /(^|[/#]):id(?=$|[/?#])/.test(pathKey(d.path || ''));
+    const view = d.view && rec ? String(d.view).split(/\s+/).filter(w => !/\d/.test(w)).join(' ').replace(/^[\s/·|:-]+|[\s/·|:-]+$/g, '') : d.view;
+    if (view) return `${rec ? 'нужной записи ' : ''}«${String(view).slice(0, 60)}»`;
+    return `«${String(d.path || '/').split('?')[0].replace(/#(?![!/]).*$/, '').slice(0, 60)}»`;
+  };
 
   let run = null; // { steps, index, opts, el, cleanup: [], healed, advanced, mores, asked, asking }
   let lastSteps = [];
@@ -499,6 +508,8 @@
     let instruction = isRowStep(step) ? rowInstruction(step) : step.instruction;
     if (f.away) instruction = `Перейдите на страницу ${pagePlace(step.target)}. Там: ${trim(instruction)}`;
     if (f.gaveUp) instruction = `${trim(instruction)}. Не вижу этот элемент на странице: сделайте шаг сами и нажмите «Далее».`;
+    // Picked up again after the user left the way (resync).
+    if (me.note && me.note.at === at && !f.away) instruction = `${me.note.back ? 'Вернёмся на путь' : 'Вы уже здесь, продолжаем'}: ${instruction}`;
     S.pointer.point(el, {
       step: at + 1, total: me.steps.length, instruction, value: step.value, waiting: !!(f.waiting || f.away),
       autoAdvance: !!el && step.action !== 'look',
@@ -678,8 +689,29 @@
     // re-finds it through relocate(), which owns the search; this observer only notices a removal (no layout,
     // no resolve) and, if the pointer hasn't re-pointed us within a second, falls back to waiting.
     let grace = 0;
+    // The user went to another address on their own (back to where a later step is, or ahead of the guide):
+    // go on from the nearest later step whose page this is and whose control is here. A few tries per address.
+    const armHref = location.href;
+    let seenHref = armHref, tries = 0;
+    const ahead = () => {
+      if (location.href === armHref || hidden() || !alive(me, at) || me.advanced === at) return false;
+      if (location.href !== seenHref) { seenHref = location.href; tries = 0; }
+      if (tries++ >= RESYNC_TRIES) return false;
+      for (let j = at + 1; j < Math.min(me.steps.length, at + 7); j++) {
+        const s = me.steps[j];
+        if (s && s.target && s.target.path && !s.target.auto && samePage(s.target.path) && find(s)) {
+          if (alive(me, at)) { me.note = { at: j, back: false }; go(j); }
+          return true;
+        }
+      }
+      return false;
+    };
+    const onNav = throttle(ahead, 400);
+    addEventListener('hashchange', onNav);
+    addEventListener('popstate', onNav);
     const mo = new MutationObserver(throttle(() => {
       if (hidden() || grace || !alive(me, at) || me.advanced === at) return;
+      if (location.href !== armHref && ahead()) return;
       const el = cur();
       if (el && el.isConnected) return;
       grace = setTimeout(() => {
@@ -691,11 +723,28 @@
 
     me.cleanup.push(() => {
       pairs.forEach(([t, fn]) => removeEventListener(t, fn, opts));
+      removeEventListener('hashchange', onNav);
+      removeEventListener('popstate', onNav);
       mo.disconnect();
       clearTimeout(grace);
       if (amo) amo.disconnect();
       me.rewatch = null;
     });
+  }
+
+  /**
+   * The user left the step's page. The step to go on from here: a later one whose page this is (they went ahead
+   * on their own), else the nearest earlier one whose control is here (a menu item, the list they came from).
+   * -1 when nothing fits: the card keeps asking them to go to the step's page.
+   */
+  function resync(me, at) {
+    const fits = j => { const s = me.steps[j]; return !!(s && s.target && !s.target.auto && find(s)); };
+    for (let j = at + 1; j < Math.min(me.steps.length, at + 6); j++) {
+      const s = me.steps[j];
+      if (s && s.target && s.target.path && samePage(s.target.path) && fits(j)) return j;
+    }
+    for (let j = at - 1; j >= 0; j--) if (fits(j)) return j;
+    return -1;
   }
 
   // The control isn't here yet (menu closed, page still loading, UI changed, another page).
@@ -710,6 +759,7 @@
     let href = location.href;
     // A dialog that is open (or opens while we wait) holds the step's control if it is anywhere: it is decided sooner.
     let dialog = !!topDialog(), since = now(), healed = false;
+    let triedAt = '', tries = 0;
     const check = () => {
       pending = 0;
       idleH = null;
@@ -725,9 +775,24 @@
         if (!done && !me.asking) draw(null, step, away ? { away: true } : { waiting: true });
         armHeal();
       }
+      // Off the way (a wrong click, a link elsewhere): pick the guide up from the step that fits this page,
+      // ahead or back, for free. Only after a moment away, so a step whose click is still changing the
+      // address is not taken back; a few tries per address, since the new page may still be rendering.
+      let more = false;
+      if (away && !me.asking) {
+        if (location.href !== triedAt) { triedAt = location.href; tries = 0; }
+        if (tries < RESYNC_TRIES) {
+          if (now() - since >= RESYNC_AFTER) {
+            tries++;
+            const j = resync(me, at);
+            if (j >= 0 && alive(me, at)) { me.note = { at: j, back: j < at }; go(j); return; }
+          }
+          more = tries < RESYNC_TRIES;
+        }
+      }
       // Back off: nothing changed that mattered. Never closer than DUTY × the measured cost.
       delay = Math.min(Math.max(Math.min(delay * 2, 2000), cost * DUTY), 10000);
-      if (follow > 0) { follow--; schedule(false); }
+      if (more) { delay = Math.min(delay, 1000); schedule(false); } else if (follow > 0) { follow--; schedule(false); }
     };
     const schedule = urgent => {
       if (pending || idleH || hidden() || !alive(me, at)) return;
@@ -763,7 +828,8 @@
     if (!hidden()) observe();
     schedule(false); // a few spaced checks even if nothing changes (a dialog still fading in)
     const nudge = setInterval(() => { if (skipped && !done) { skipped = false; schedule(false); } }, NUDGE);
-    const onNav = () => schedule(true);
+    // A route change: the new screen often renders a moment later, so a few spaced checks follow the first one.
+    const onNav = () => { follow = 3; schedule(true); };
     addEventListener('hashchange', onNav);
     addEventListener('popstate', onNav);
     // The end of an animation or transition on something that could be (or hold) the control: one more check.

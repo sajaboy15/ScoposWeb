@@ -399,7 +399,10 @@ async function api(req, res) {
       const why = spend();
       if (why) return json(res, 429, { error: why });
       // The product name is pinned at learn time: a client can't change the cached prefix or the prompt.
-      const out = await Brain.call(Brain.buildAskMap({ question, map, current, history, product: knowledge.product || '', cacheTtl: askCacheTtl() }), KEY, { fromBrowser: false, signal, onText: r.onText, onUsage: usageLogger('ask-map') });
+      // The guides closest to the question point at the screens it means (a Russian question about an English UI).
+      const ix = instantIndex();
+      const focus = ix && Brain.focusViews ? Brain.focusViews(knowledge.guides || [], Brain.instantMatch(ix, question)) : [];
+      const out = await Brain.call(Brain.buildAskMap({ question, map, current, history, product: knowledge.product || '', cacheTtl: askCacheTtl(), focus }), KEY, { fromBrowser: false, signal, onText: r.onText, onUsage: usageLogger('ask-map') });
       const steps = Brain.refSteps(out.steps || [], map, question);
       const answer = String(out.answer || '').slice(0, 600);
       if (cacheable) cachePut(k, { answer, steps });

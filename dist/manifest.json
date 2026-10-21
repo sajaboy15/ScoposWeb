@@ -1,20 +1,20 @@
 {
   "loader": "scopos.js",
-  "core": "scopos-core.f5a5d7205c.js",
-  "learn": "scopos-learn.9c8fb2d134.js",
+  "core": "scopos-core.35ca825660.js",
+  "learn": "scopos-learn.98297a8b90.js",
   "minified": true,
   "sizes": {
     "scopos.js": {
       "raw": 4414,
       "gzip": 2347
     },
-    "scopos-core.f5a5d7205c.js": {
-      "raw": 141973,
-      "gzip": 54005
+    "scopos-core.35ca825660.js": {
+      "raw": 144077,
+      "gzip": 54746
     },
-    "scopos-learn.9c8fb2d134.js": {
-      "raw": 86872,
-      "gzip": 32827
+    "scopos-learn.98297a8b90.js": {
+      "raw": 86918,
+      "gzip": 32849
     }
   }
 }

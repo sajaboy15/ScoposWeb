@@ -488,8 +488,9 @@ async function ask(tabId, question, { force = false } = {}) {
     const history = (prev && prev.history) || [];
 
     // 1. A saved or learned guide (by its name or a FAQ phrasing), or a learned fact: answered here, 0 tokens.
+    let m = null;
     if (!force) {
-      const m = await instantMatch(origin, question);
+      m = await instantMatch(origin, question);
       if (m.kind === 'guide') {
         bumpRuns(origin, m.guide.id);
         return await start(tabId, runId, { question, answer: `Сценарий «${m.guide.name}»`, steps: m.steps, source: 'playbook', via: 'playbook', playbookId: m.guide.id, live: !!m.guide.live, ms: Date.now() - t0, origin });
@@ -523,7 +524,10 @@ async function ask(tabId, question, { force = false } = {}) {
       let out, steps, via;
       if (map) {
         // A learned product map: plan across every screen at once, with exact controls.
-        out = await claude(Brain.buildAskMap({ question, map, current: view, history, cacheTtl: askCacheTtl(origin) }), a, origin, opts);
+        // The guides closest to the question point at the screens it means (its words may be in another language).
+        if (!m) m = await instantMatch(origin, question).catch(() => null);
+        const focus = m && Brain.focusViews ? Brain.focusViews(await getPlaybooks(origin), m) : [];
+        out = await claude(Brain.buildAskMap({ question, map, current: view, history, cacheTtl: askCacheTtl(origin), focus }), a, origin, opts);
         steps = Brain.refSteps(out.steps || [], map, question);
         via = 'map';
       } else {
@@ -672,6 +676,7 @@ async function mapViewFor(origin, url) {
 
 // ---------- continuing a guide past its end (a live guide) or past a step it can't find ----------
 const MAX_DONE = 30;
+const MAX_MISSING = 3;
 /**
  * The guide asks for more: reason 'end' (a live guide ran out of steps) or 'missing' (step `index` isn't here).
  * One call per reason per run, on the ask model, from the current page. Returns { steps } (page descriptors) or
@@ -689,10 +694,16 @@ async function continueGuide(tabId, msg) {
   if (!a) return { steps: null };
   const runId = s.runId;
   let claimed = false;
+  // 'end' once per run; 'missing' up to MAX_MISSING times (a user who clicked the wrong thing twice still gets
+  // the way back), but never twice for one step of one list.
+  const tag = `${msg.index}:${s.steps.length}`;
   await updateSession(tabId, cur => {
-    if (!cur || cur.runId !== runId || (cur.mores || {})[reason]) return undefined;
+    const m = (cur && cur.mores) || {};
+    if (!cur || cur.runId !== runId || cur.continuing) return undefined;
+    if (reason === 'end' ? m.end : (m.missing || 0) >= MAX_MISSING || (m.tags || []).includes(tag)) return undefined;
     claimed = true;
-    return { ...cur, mores: { ...(cur.mores || {}), [reason]: true }, continuing: true };
+    const next = reason === 'end' ? { ...m, end: true } : { ...m, missing: (m.missing || 0) + 1, tags: [...(m.tags || []), tag].slice(-10) };
+    return { ...cur, mores: next, continuing: true };
   });
   if (!claimed) return { steps: null };
   const ctl = controller(tabId, runId);

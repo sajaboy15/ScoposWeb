@@ -257,11 +257,14 @@ ${UNTRUSTED}`;
 
   // Views a row control opens (a record's menu or dialog: "Edit driver: Marcus Reed") show one sample record too.
   const rowOpened = map => { const refs = new Set(); map.views.forEach(v => v.controls.forEach(c => { if (c.row) refs.add(c.ref); })); return v => !!(v.opener && refs.has(v.opener)); };
-  function viewText(v, isGlobal, fromRow) {
+  const viewHead = (v, fromRow) => {
     const where = v.kind === 'page' ? v.key : `opens from ${v.opener} on ${v.parent}`;
+    return `VIEW ${v.id} ${v.kind} "${safe(v.title, 80)}" ${safe(where, 120)}${v.form ? ' · form' : ''}${(v.kind === 'page' && /(^|[/#]):id(?=$|[/?#])/.test(v.key || '')) || (fromRow && fromRow(v)) ? ' · one record' : ''}`;
+  };
+  function viewText(v, isGlobal, fromRow) {
     const facts = factsOf(v);
     return [
-      `VIEW ${v.id} ${v.kind} "${safe(v.title, 80)}" ${safe(where, 120)}${v.form ? ' · form' : ''}${(v.kind === 'page' && /(^|[/#]):id(?=$|[/?#])/.test(v.key || '')) || (fromRow && fromRow(v)) ? ' · one record' : ''}`,
+      viewHead(v, fromRow),
       ...(facts.length ? [`  facts: ${facts.join(' | ')}`] : []),
       ...v.controls.filter(c => v.kind !== 'page' || !isGlobal(c)).slice(0, 120).map(lineOf),
     ].join('\n');
@@ -316,9 +319,83 @@ ${UNTRUSTED}`;
    * come often (several an hour), otherwise a 5-minute cache catches follow-ups without paying for an hour.
    */
   function mapSystem(map, opts = {}) {
-    const m = mapText(map, opts);
     const ttl = opts.cacheTtl === '1h' ? CACHE_1H : opts.cacheTtl === 'none' ? {} : CACHE_5M;
-    return [{ type: 'text', text: MAP_SYSTEM }, { type: 'text', text: `<product_map>\n${m.text}\n</product_map>`, ...(m.complete ? ttl : {}) }];
+    const m = mapText(map, opts);
+    if (m.complete) return [{ type: 'text', text: MAP_SYSTEM }, { type: 'text', text: `<product_map>\n${m.text}\n</product_map>`, ...ttl }];
+    // Too big to send whole: an index of every view (the same for every question, so it is cached and costs 0.05x
+    // after the first one), then the full controls of the views this question needs (paid, kept small).
+    const p = mapParts(map, opts);
+    return [
+      { type: 'text', text: MAP_SYSTEM },
+      { type: 'text', text: `<product_map>\n${p.index}\n`, ...ttl },
+      { type: 'text', text: `${p.detail}\n</product_map>` },
+    ];
+  }
+
+  const DETAIL_BUDGET = 18000; // characters of full views per question when the map is sent as index + details
+  /**
+   * index: GLOBAL and one header line per view (stable for the map). detail: the full views for this question:
+   * the current view, the views the question's words point at, and every view on the way to them (→ links from
+   * where the user is, or from a GLOBAL link), so each step has a ref to point at.
+   */
+  function mapParts(map, { question = '', current = null, budget = DETAIL_BUDGET, focus = [] } = {}) {
+    const { isGlobal, head } = globalHead(map);
+    const fromRow = rowOpened(map);
+    // One short line per view: pages by their address (the part every address shares said once), dialogs and
+    // panels by the ref that opens them ("← V43.41" opens on V43).
+    const keys = map.views.filter(v => v.kind === 'page').map(v => rekey(v.key));
+    let pre = keys.length > 1 ? keys.reduce((a, k) => { let i = 0; while (i < a.length && a[i] === k[i]) i++; return a.slice(0, i); }) : '';
+    pre = pre.slice(0, Math.max(pre.lastIndexOf('#'), pre.lastIndexOf('/')) + 1);
+    // The site name most page titles end with ("Batches · RoadLedger TMS") is said once too.
+    const tails = {};
+    map.views.forEach(v => { const m = /\s[·|–—-]\s[^·|–—]{2,40}$/.exec(v.title || ''); if (m) tails[m[0]] = (tails[m[0]] || 0) + 1; });
+    const tail = Object.keys(tails).find(t => tails[t] >= keys.length * 0.5) || '';
+    const line = v => {
+      const key = rekey(v.key);
+      v = tail && String(v.title || '').endsWith(tail) ? { ...v, title: v.title.slice(0, -tail.length) } : v;
+      const rec = (v.kind === 'page' && /(^|[/#]):id(?=$|[/?#])/.test(key)) || fromRow(v);
+      const where = v.kind === 'page' ? (pre && key.startsWith(pre) ? '…' + key.slice(pre.length) : key) : `← ${v.opener}`;
+      return `${v.id} ${v.kind} "${safe(v.title, 60)}" ${safe(where, 90)}${v.form ? ' · form' : ''}${rec ? ' · one record' : ''}`;
+    };
+    const index = [...head,
+      `INDEX: every view, one line each: id, kind, title, address (… stands for ${safe(pre, 80) || '/'}) or ← the ref that opens it. full views with their controls follow after it, for the views this question needs; a view listed only here has no refs to use: reach it through a → link from a full view, and never invent refs.`,
+      ...map.views.map(line), 'FULL VIEWS'].join('\n');
+    const byId = Object.fromEntries(map.views.map(v => [v.id, v]));
+    const text = new Map(map.views.map(v => [v.id, viewText(v, isGlobal, fromRow)]));
+    // Ways in: → links of each view, and the dialogs/panels that open on it.
+    const out = new Map(map.views.map(v => [v.id, new Set()]));
+    map.views.forEach(v => {
+      v.controls.forEach(c => { if (c.to && byId[c.to]) out.get(v.id).add(c.to); });
+      if (v.parent && byId[v.parent]) out.get(v.parent).add(v.id);
+    });
+    // Shortest ways from where the user is, and from the GLOBAL links (reachable from anywhere).
+    const prev = new Map(), queue = [];
+    const seed = id => { if (byId[id] && !prev.has(id)) { prev.set(id, null); queue.push(id); } };
+    seed(current);
+    map.views.forEach(v => v.controls.forEach(c => { if (c.to && isGlobal(c)) seed(c.to); }));
+    for (let i = 0; i < queue.length; i++) for (const n of out.get(queue[i]) || []) if (!prev.has(n)) { prev.set(n, queue[i]); queue.push(n); }
+    const way = id => { const w = []; for (let n = id, k = 0; n != null && k < 12; n = prev.get(n), k++) w.push(n); return w; };
+    // Views by the question's words (title counts double), best first.
+    const q = new Set(tokens(question));
+    const hits = map.views.map(v => {
+      const t = tokens(text.get(v.id)), h = tokens(v.title);
+      return { id: v.id, s: t.filter(x => q.has(x)).length + 2 * h.filter(x => q.has(x)).length };
+    }).filter(x => x.s > 0).sort((a, b) => b.s - a.s);
+    const order = [];
+    const add = id => { if (byId[id] && !order.includes(id)) order.push(id); };
+    add(current);
+    for (const id of focus || []) way(id).reverse().forEach(add);
+    for (const h of hits.slice(0, 6)) way(h.id).reverse().forEach(add);
+    hits.forEach(h => add(h.id));
+    const keep = new Set();
+    let size = 0;
+    for (const id of order) {
+      const n = text.get(id).length + 1;
+      if (size + n > budget) continue;
+      keep.add(id);
+      size += n;
+    }
+    return { index, detail: map.views.filter(v => keep.has(v.id)).map(v => text.get(v.id)).join('\n'), views: keep.size };
   }
 
   // ---------------- learning: guides written once from the map ----------------
@@ -961,10 +1038,25 @@ ${UNTRUSTED}`;
   }
 
   /** Answers a question from the map: steps across pages point at known controls, nothing is guessed. */
-  function buildAskMap({ question, map, current, history = [], product = '', cacheTtl = '5m' }) {
+  // focus: views the closest learned guides go through (focusViews), for a map sent as index + details.
+  function buildAskMap({ question, map, current, history = [], product = '', cacheTtl = '5m', focus = [] }) {
     const messages = cleanHistory(history);
     messages.push({ role: 'user', content: `${product ? 'product: ' + capText(product, 80) + '\n' : ''}the user is on view ${current || 'unknown'}.\n${capText(question, 600)}\n\nif it is a question rather than a task, answer it in "answer" and return no steps.` });
-    return body('ask', mapSystem(map, { question, current, cacheTtl }), messages, MAP_ASK_SCHEMA, { effort: 'low', maxTokens: 8000 });
+    return body('ask', mapSystem(map, { question, current, cacheTtl, focus }), messages, MAP_ASK_SCHEMA, { effort: 'low', maxTokens: 8000 });
+  }
+
+  /**
+   * The views the learned guides closest to a question go through (an instantMatch result's top and suggest):
+   * they tell mapParts which screens a question means when its words don't name them (another language).
+   */
+  function focusViews(guides, m) {
+    const names = new Set([...((m && m.top) || []).filter(t => t && t.kind === 'guide').map(t => t.name), ...((m && m.suggest) || []).map(g => g && g.name)]);
+    const out = [];
+    for (const g of guides || []) {
+      if (!g || !names.has(g.name)) continue;
+      for (const s of g.steps || []) { const v = String((s && s.ref) || '').split('.')[0]; if (v && !out.includes(v)) out.push(v); }
+    }
+    return out.slice(0, 16);
   }
 
   // History keeps only the questions and the short answers, never element ids or selectors.
@@ -1563,7 +1655,7 @@ ${UNTRUSTED}`;
   // Same address rules as the explorer's pageKey (explore.js): ids become :id, trailing slashes go,
   // route-like query params stay, and only "#/" or "#!" hashes are routes.
   const ROUTE_Q = /^(page|view|tab|section|module|route|p|screen)$/i;
-  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,})(?=\/|$)/gi;
+  const ID_SEG = /\/(?:\d+|[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{16,}|(?=[^/]*\d)[A-Za-z0-9_-]{20,}|[A-Za-z]{1,8}[-_]?\d{3,}(?:[-_][A-Za-z0-9]+)*)(?=\/|$)/gi;
   function pageKey(url) {
     const x = new URL(url);
     const path = x.pathname.replace(ID_SEG, '/:id').replace(/\/+$/, '') || '/';
@@ -1572,11 +1664,24 @@ ${UNTRUSTED}`;
     return path + (q ? '?' + q : '') + (h.length > 2 ? h : '');
   }
 
-  /** Which map view the user is on now, by address. */
+  // A stored key under today's id rule (a map learned before a rule change kept "DT-000148" as a word).
+  const rekey = k => String(k || '').replace(ID_SEG, '/:id');
+  // The same record screen in another state: "/loads/booked/:id" and "/loads/assigned/:id" (one plain segment differs).
+  function sibling(a, b) {
+    if (!/:id/.test(a) || !/:id/.test(b)) return false;
+    const x = a.split('/'), y = b.split('/');
+    if (x.length !== y.length) return false;
+    let diff = 0;
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i] && (x[i] === ':id' || y[i] === ':id' || ++diff > 1)) return false;
+    return diff === 1;
+  }
+
+  /** Which map view the user is on now, by address; else the same record screen in another state. */
   function viewOf(map, url) {
     try {
       const key = pageKey(url);
-      const v = map.views.find(x => x.kind === 'page' && x.key === key);
+      const pages = map.views.filter(x => x.kind === 'page');
+      const v = pages.find(x => rekey(x.key) === key) || pages.find(x => sibling(rekey(x.key), key));
       return v ? v.id : null;
     } catch (e) { return null; }
   }
@@ -1727,7 +1832,7 @@ ${UNTRUSTED}`;
   }
 
   const Brain = {
-    MODELS, buildAsk, buildLocate, buildContinue, askSteps, buildLearn, buildLearnBatches, learnGroups, learnViews, finishGuides, mergeGuides, buildAskMap, mapText, factOk, refSteps, safeValue, viewOf, pageKey, call, parse, headers, tokens, norm, API_URL, MAP_BUDGET, MAP_SYSTEM,
+    MODELS, buildAsk, buildLocate, buildContinue, askSteps, buildLearn, buildLearnBatches, learnGroups, learnViews, finishGuides, mergeGuides, buildAskMap, focusViews, mapText, mapParts, factOk, refSteps, safeValue, viewOf, pageKey, call, parse, headers, tokens, norm, API_URL, MAP_BUDGET, MAP_SYSTEM,
     // deep learn and instant answers
     buildDeepLearn, deepPlan, learnEstimate, learnRun, finishLearn, buildFaq, cleanDocs, parseDocs, cleanQuestions,
     Instant, instantIndex: Instant.index, instantMatch: Instant.match, instantFill: Instant.fill,

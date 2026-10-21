@@ -999,7 +999,7 @@ input:focus-visible { outline: none; }
   }
 
   const here = () => location.pathname + (location.hash && location.hash !== '#' && location.hash !== '#/' ? location.hash : '');
-  const samePage = path => !path || (S.pathKey ? S.pathKey(path) === S.pathKey(location.pathname + location.search + location.hash) : String(path).replace(/#\/?$/, '') === here());
+  const samePage = path => !path || (S.samePlace ? S.samePlace(path, location.pathname + location.search + location.hash) : S.pathKey ? S.pathKey(path) === S.pathKey(location.pathname + location.search + location.hash) : String(path).replace(/#\/?$/, '') === here());
 
   // live: the guide stops where the learned map stopped (a form the explorer did not open); at its end the
   // rest is planned once from the page the user is on.

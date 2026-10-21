@@ -913,5 +913,7 @@
     };
   }
 
-  S.pointer = { point, hide, recording, debug, isOurs: el => !!(el && el.closest && (el.closest('scopos-layer') || el.closest('[data-scopos-ui]'))) };
+  // The card's instruction as shown (tests and the panel's mirror read it; the card lives in a closed shadow root).
+  const cardText = () => { try { const t = card && card.querySelector('.text'); return t ? t.textContent : ''; } catch (e) { return ''; } };
+  S.pointer = { point, hide, recording, debug, cardText, isOurs: el => !!(el && el.closest && (el.closest('scopos-layer') || el.closest('[data-scopos-ui]'))) };
 })(typeof window !== 'undefined' ? window : globalThis);
